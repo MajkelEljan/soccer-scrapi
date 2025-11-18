@@ -1015,7 +1015,7 @@ class SofaScoreEkstraklasa {
                                     <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
                                 </span>
                             <?php else: ?>
-                                <span class="match-date"><?php echo date('d.m.Y H:i', $match['startTimestamp'] + 7200); ?></span>
+                                <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
                                     <span class="match-status"><?php echo esc_html($status); ?></span>
                                 <?php endif; ?>
@@ -1294,7 +1294,7 @@ class SofaScoreEkstraklasa {
                                     <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
                                 </span>
                             <?php else: ?>
-                                <span class="match-date"><?php echo date('d.m.Y H:i', $match['startTimestamp'] + 7200); ?></span>
+                                <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
                                     <span class="match-status"><?php echo esc_html($status); ?></span>
                                 <?php endif; ?>
