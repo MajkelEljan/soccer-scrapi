@@ -575,12 +575,34 @@ class SofaScoreEkstraklasa {
             </div>';
         }
         
+        // Pobierz overrides
+        $overrides = get_option('sofascore_match_overrides', array());
+        
         // Zbierz wszystkie mecze Wisły Płock
         $wisla_matches = array();
         
         foreach ($saved_rounds as $round_num => $round_data) {
             if (isset($round_data['data']['events'])) {
                 foreach ($round_data['data']['events'] as $match) {
+                    $match_id = $match['id'] ?? null;
+                    
+                    // Zastosuj override jeśli istnieje
+                    if ($match_id && isset($overrides[$match_id])) {
+                        $override = $overrides[$match_id];
+                        
+                        $match['homeTeam']['name'] = $override['home_team'];
+                        $match['awayTeam']['name'] = $override['away_team'];
+                        $match['startTimestamp'] = $override['timestamp'];
+                        $match['status']['description'] = $override['status'];
+                        
+                        if ($override['home_score'] !== null) {
+                            $match['homeScore']['current'] = $override['home_score'];
+                        }
+                        if ($override['away_score'] !== null) {
+                            $match['awayScore']['current'] = $override['away_score'];
+                        }
+                    }
+                    
                     // Sprawdź czy Wisła Płock gra w tym meczu
                     $is_wisla_match = (
                         stripos($match['homeTeam']['name'], 'Wisła Płock') !== false ||
@@ -958,8 +980,37 @@ class SofaScoreEkstraklasa {
             return '<div class="sofascore-error">Brak danych terminarza</div>';
         }
         
-        // Filtruj mecze - usuń postponed
-        $filtered_events = array_filter($data['events'], function($match) {
+        // Pobierz overrides i zastosuj je do eventów
+        $overrides = get_option('sofascore_match_overrides', array());
+        $events_with_overrides = array();
+        
+        foreach ($data['events'] as $event) {
+            $match_id = $event['id'] ?? null;
+            
+            // Zastosuj override jeśli istnieje
+            if ($match_id && isset($overrides[$match_id])) {
+                $override = $overrides[$match_id];
+                
+                // Nadpisz dane overridem
+                $event['homeTeam']['name'] = $override['home_team'];
+                $event['awayTeam']['name'] = $override['away_team'];
+                $event['startTimestamp'] = $override['timestamp'];
+                $event['status']['description'] = $override['status'];
+                
+                // Nadpisz wyniki
+                if ($override['home_score'] !== null) {
+                    $event['homeScore']['current'] = $override['home_score'];
+                }
+                if ($override['away_score'] !== null) {
+                    $event['awayScore']['current'] = $override['away_score'];
+                }
+            }
+            
+            $events_with_overrides[] = $event;
+        }
+        
+        // Filtruj mecze - usuń postponed (PO zastosowaniu overrides)
+        $filtered_events = array_filter($events_with_overrides, function($match) {
             $status = strtolower($match['status']['description'] ?? '');
             return $status !== 'postponed';
         });
