@@ -1004,6 +1004,13 @@ class SofaScoreEkstraklasa {
                 if ($override['away_score'] !== null) {
                     $event['awayScore']['current'] = $override['away_score'];
                 }
+                // Nadpisz wyniki do przerwy (jeśli podane)
+                if (isset($override['home_score_ht']) && $override['home_score_ht'] !== null) {
+                    $event['homeScore']['period1'] = $override['home_score_ht'];
+                }
+                if (isset($override['away_score_ht']) && $override['away_score_ht'] !== null) {
+                    $event['awayScore']['period1'] = $override['away_score_ht'];
+                }
             }
             
             $events_with_overrides[] = $event;
@@ -1073,6 +1080,9 @@ class SofaScoreEkstraklasa {
                                 <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
                                     <span class="match-result">
                                         <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                        <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
+                                            <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
+                                        <?php endif; ?>
                                     </span>
                                 <?php elseif ($event_details && isset($event_details['event']['homeScore']['current'], $event_details['event']['awayScore']['current'])): ?>
                                     <span class="match-result">
@@ -1367,6 +1377,9 @@ class SofaScoreEkstraklasa {
                                 <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
                                     <span class="match-result">
                                         <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                        <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
+                                            <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
+                                        <?php endif; ?>
                                     </span>
                                 <?php elseif ($event_details && isset($event_details['event']['homeScore']['current'], $event_details['event']['awayScore']['current'])): ?>
                                     <span class="match-result">
@@ -6494,12 +6507,20 @@ class SofaScoreEkstraklasa {
                             <td><input type="text" id="edit_away_team" name="away_team" class="regular-text" readonly style="background:#f0f0f0;"></td>
                         </tr>
                         <tr>
-                            <th><label for="edit_home_score">Wynik gospodarzy</label></th>
+                            <th><label for="edit_home_score">Wynik końcowy gospodarzy</label></th>
                             <td><input type="number" id="edit_home_score" name="home_score" min="0" max="20" style="width:80px;"></td>
                         </tr>
                         <tr>
-                            <th><label for="edit_away_score">Wynik gości</label></th>
+                            <th><label for="edit_away_score">Wynik końcowy gości</label></th>
                             <td><input type="number" id="edit_away_score" name="away_score" min="0" max="20" style="width:80px;"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_home_score_ht">Wynik do przerwy gospodarzy</label></th>
+                            <td><input type="number" id="edit_home_score_ht" name="home_score_ht" min="0" max="20" style="width:80px;" placeholder="opcjonalnie"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_away_score_ht">Wynik do przerwy gości</label></th>
+                            <td><input type="number" id="edit_away_score_ht" name="away_score_ht" min="0" max="20" style="width:80px;" placeholder="opcjonalnie"></td>
                         </tr>
                         <tr>
                             <th><label for="edit_timestamp">Data i godzina</label></th>
@@ -6548,6 +6569,8 @@ class SofaScoreEkstraklasa {
                         $('#edit_away_team').val(data.away_team);
                         $('#edit_home_score').val(data.home_score || '');
                         $('#edit_away_score').val(data.away_score || '');
+                        $('#edit_home_score_ht').val(data.home_score_ht || '');
+                        $('#edit_away_score_ht').val(data.away_score_ht || '');
                         $('#edit_timestamp').val(data.timestamp_formatted);
                         $('#edit_status').val(data.status);
                         
@@ -6671,6 +6694,8 @@ class SofaScoreEkstraklasa {
                 'away_team' => $override['away_team'],
                 'home_score' => $override['home_score'],
                 'away_score' => $override['away_score'],
+                'home_score_ht' => $override['home_score_ht'] ?? '',
+                'away_score_ht' => $override['away_score_ht'] ?? '',
                 'timestamp' => $override['timestamp'],
                 'timestamp_formatted' => date('Y-m-d\TH:i', $override['timestamp']),
                 'status' => $override['status']
@@ -6682,6 +6707,8 @@ class SofaScoreEkstraklasa {
                 'away_team' => $match_event['awayTeam']['name'] ?? '',
                 'home_score' => $match_event['homeScore']['current'] ?? '',
                 'away_score' => $match_event['awayScore']['current'] ?? '',
+                'home_score_ht' => $match_event['homeScore']['period1'] ?? '',
+                'away_score_ht' => $match_event['awayScore']['period1'] ?? '',
                 'timestamp' => $match_event['startTimestamp'] ?? time(),
                 'timestamp_formatted' => date('Y-m-d\TH:i', $match_event['startTimestamp'] ?? time()),
                 'status' => $match_event['status']['description'] ?? 'Scheduled'
@@ -6707,6 +6734,8 @@ class SofaScoreEkstraklasa {
         $away_team = sanitize_text_field($_POST['away_team']);
         $home_score = isset($_POST['home_score']) && $_POST['home_score'] !== '' ? intval($_POST['home_score']) : null;
         $away_score = isset($_POST['away_score']) && $_POST['away_score'] !== '' ? intval($_POST['away_score']) : null;
+        $home_score_ht = isset($_POST['home_score_ht']) && $_POST['home_score_ht'] !== '' ? intval($_POST['home_score_ht']) : null;
+        $away_score_ht = isset($_POST['away_score_ht']) && $_POST['away_score_ht'] !== '' ? intval($_POST['away_score_ht']) : null;
         $timestamp_str = sanitize_text_field($_POST['timestamp']);
         $status = sanitize_text_field($_POST['status']);
         
@@ -6726,6 +6755,8 @@ class SofaScoreEkstraklasa {
             'away_team' => $away_team,
             'home_score' => $home_score,
             'away_score' => $away_score,
+            'home_score_ht' => $home_score_ht,
+            'away_score_ht' => $away_score_ht,
             'timestamp' => $timestamp,
             'status' => $status,
             'edited_at' => current_time('Y-m-d H:i:s'),
