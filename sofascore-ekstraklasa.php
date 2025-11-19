@@ -3,7 +3,7 @@
  * Plugin Name: Soccer ScrAPI
  * Plugin URI: https://nafciarski.pl
  * Description: Plugin do pobierania i wyświetlania danych Ekstraklasy (SofaScore API) oraz III ligi - Wisła II Płock (90minut.pl)
- * Version: 1.6.0
+ * Version: 1.7.0
  * Author: Majkel
  * License: GPL v2 or later
  * Text Domain: sofascore-ekstraklasa
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Stałe pluginu
-define('SOFASCORE_PLUGIN_VERSION', '1.6.0');
+define('SOFASCORE_PLUGIN_VERSION', '1.7.0');
 define('SOFASCORE_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('SOFASCORE_PLUGIN_PATH', plugin_dir_path(__FILE__));
 
@@ -53,6 +53,11 @@ class SofaScoreEkstraklasa {
         
         // AJAX handler dla ustawień
         add_action('wp_ajax_save_sofascore_settings', array($this, 'ajax_save_settings'));
+        
+        // AJAX handlers dla edycji meczów
+        add_action('wp_ajax_get_match_override_data', array($this, 'ajax_get_match_override_data'));
+        add_action('wp_ajax_save_match_override', array($this, 'ajax_save_match_override'));
+        add_action('wp_ajax_remove_match_override', array($this, 'ajax_remove_match_override'));
         
         // Rejestracja shortcodes - Ekstraklasa
         add_shortcode('tabela_ekstraklasa', array($this, 'shortcode_tabela'));
@@ -1589,6 +1594,16 @@ class SofaScoreEkstraklasa {
             'manage_options',
             'wisla-kadra-admin',
             array($this, 'wisla_kadra_admin_page')
+        );
+        
+        // === EDYCJA MECZÓW ===
+        add_submenu_page(
+            'sofascore-ekstraklasa',
+            'Edycja meczów - Ręczne korekty',
+            'Edycja meczów',
+            'manage_options',
+            'sofascore-edit-matches',
+            array($this, 'edit_matches_page')
         );
         
         // === USTAWIENIA ===
@@ -6100,17 +6115,51 @@ class SofaScoreEkstraklasa {
         if (!empty($saved_rounds)) {
             $current_season = '76477'; // Ekstraklasa 2024/2025
             $updated_count = 0;
+            $overrides = get_option('sofascore_match_overrides', array());
             
             foreach ($saved_rounds as $round_number => $round_data) {
                 // Pobierz świeże dane z API
                 $result = $this->get_round_fixtures($current_season, $round_number);
                 
                 if ($result['success']) {
-                    // Zaktualizuj dane
+                    $api_events = $result['data']['events'] ?? array();
+                    
+                    // Zastosuj overrides do meczów
+                    $merged_events = array();
+                    foreach ($api_events as $event) {
+                        $match_id = $event['id'] ?? null;
+                        
+                        // Jeśli jest override dla tego meczu, zastosuj go
+                        if ($match_id && isset($overrides[$match_id])) {
+                            $override = $overrides[$match_id];
+                            
+                            // Zachowaj oryginalne dane ale nadpisz wybrane pola
+                            $event['homeTeam']['name'] = $override['home_team'];
+                            $event['awayTeam']['name'] = $override['away_team'];
+                            $event['startTimestamp'] = $override['timestamp'];
+                            $event['status']['description'] = $override['status'];
+                            
+                            if ($override['home_score'] !== null) {
+                                $event['homeScore']['current'] = $override['home_score'];
+                            }
+                            if ($override['away_score'] !== null) {
+                                $event['awayScore']['current'] = $override['away_score'];
+                            }
+                            
+                            // Dodaj flagę że to override (do debugowania)
+                            $event['_manual_override'] = true;
+                        }
+                        
+                        $merged_events[] = $event;
+                    }
+                    
+                    // Zaktualizuj dane z połączonymi eventami
+                    $result['data']['events'] = $merged_events;
+                    
                     $saved_rounds[$round_number] = array(
                         'data' => $result['data'],
                         'updated' => current_time('Y-m-d H:i:s'),
-                        'matches_count' => count($result['data']['events'] ?? array())
+                        'matches_count' => count($merged_events)
                     );
                     $updated_count++;
                 }
@@ -6196,6 +6245,442 @@ class SofaScoreEkstraklasa {
         // Zaplanuj nowy - co 5 minut (będziemy sprawdzać czy jest w harmonogramie)
         if (!wp_next_scheduled('sofascore_auto_refresh')) {
             wp_schedule_event(time(), 'every_5_minutes', 'sofascore_auto_refresh');
+        }
+    }
+    
+    /**
+     * Strona edycji meczów - ręczne korekty
+     */
+    public function edit_matches_page() {
+        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        $overrides = get_option('sofascore_match_overrides', array());
+        
+        // Filtrowanie
+        $selected_round = isset($_GET['filter_round']) ? intval($_GET['filter_round']) : 0;
+        $show_only_overridden = isset($_GET['show_overridden']) && $_GET['show_overridden'] == '1';
+        
+        ?>
+        <div class="wrap">
+            <h1>✏️ Edycja meczów - Ręczne korekty</h1>
+            <p>Tutaj możesz ręcznie edytować dane meczów. Ręcznie edytowane mecze nie będą nadpisywane przez automatyczne odświeżanie.</p>
+            
+            <!-- Filtry -->
+            <form method="GET" style="margin:20px 0; padding:15px; background:white; border:1px solid #ccc;">
+                <input type="hidden" name="page" value="sofascore-edit-matches">
+                
+                <label style="margin-right:20px;">
+                    <strong>Filtruj po kolejce:</strong>
+                    <select name="filter_round" style="margin-left:10px;">
+                        <option value="0">Wszystkie kolejki</option>
+                        <?php for ($i = 1; $i <= 34; $i++): ?>
+                            <option value="<?php echo $i; ?>" <?php selected($selected_round, $i); ?>>
+                                Kolejka <?php echo $i; ?>
+                            </option>
+                        <?php endfor; ?>
+                    </select>
+                </label>
+                
+                <label style="margin-right:20px;">
+                    <input type="checkbox" name="show_overridden" value="1" <?php checked($show_only_overridden, true); ?>>
+                    Tylko ręcznie edytowane
+                </label>
+                
+                <button type="submit" class="button">Filtruj</button>
+                <a href="?page=sofascore-edit-matches" class="button">Reset filtrów</a>
+            </form>
+            
+            <?php
+            // Zbierz wszystkie mecze
+            $all_matches = array();
+            
+            foreach ($saved_rounds as $round_number => $round_data) {
+                // Filtrowanie po kolejce
+                if ($selected_round > 0 && $round_number != $selected_round) {
+                    continue;
+                }
+                
+                $events = $round_data['data']['events'] ?? array();
+                
+                foreach ($events as $event) {
+                    $match_id = $event['id'] ?? null;
+                    if (!$match_id) continue;
+                    
+                    $has_override = isset($overrides[$match_id]);
+                    
+                    // Filtrowanie - tylko z override
+                    if ($show_only_overridden && !$has_override) {
+                        continue;
+                    }
+                    
+                    $all_matches[] = array(
+                        'match_id' => $match_id,
+                        'round' => $round_number,
+                        'event' => $event,
+                        'has_override' => $has_override,
+                        'override_data' => $has_override ? $overrides[$match_id] : null
+                    );
+                }
+            }
+            
+            if (empty($all_matches)) {
+                echo '<div class="notice notice-info"><p>Brak meczów do wyświetlenia.</p></div>';
+            } else {
+                echo '<p><strong>Znaleziono meczów:</strong> ' . count($all_matches) . '</p>';
+                ?>
+                
+                <table class="wp-list-table widefat fixed striped">
+                    <thead>
+                        <tr>
+                            <th style="width:60px;">Kolejka</th>
+                            <th style="width:140px;">Data/Czas</th>
+                            <th>Gospodarze</th>
+                            <th style="width:80px;">Wynik</th>
+                            <th>Goście</th>
+                            <th style="width:120px;">Status</th>
+                            <th style="width:100px;">Akcje</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($all_matches as $match): 
+                            $event = $match['event'];
+                            $override = $match['override_data'];
+                            $has_override = $match['has_override'];
+                            
+                            // Użyj override jeśli istnieje, inaczej dane z API
+                            $home_team = $override['home_team'] ?? ($event['homeTeam']['name'] ?? 'N/A');
+                            $away_team = $override['away_team'] ?? ($event['awayTeam']['name'] ?? 'N/A');
+                            $status = $override['status'] ?? ($event['status']['description'] ?? 'N/A');
+                            $timestamp = $override['timestamp'] ?? ($event['startTimestamp'] ?? 0);
+                            $date_time = $timestamp ? date('Y-m-d H:i', $timestamp) : 'N/A';
+                            
+                            $home_score = $override['home_score'] ?? ($event['homeScore']['current'] ?? '-');
+                            $away_score = $override['away_score'] ?? ($event['awayScore']['current'] ?? '-');
+                            $score_display = $home_score . ':' . $away_score;
+                            
+                            $row_class = $has_override ? 'style="background:#fffbcc;"' : '';
+                        ?>
+                        <tr <?php echo $row_class; ?>>
+                            <td><strong>Kolejka <?php echo $match['round']; ?></strong></td>
+                            <td><?php echo esc_html($date_time); ?></td>
+                            <td><?php echo esc_html($home_team); ?></td>
+                            <td style="text-align:center;"><strong><?php echo esc_html($score_display); ?></strong></td>
+                            <td><?php echo esc_html($away_team); ?></td>
+                            <td><?php echo esc_html($status); ?></td>
+                            <td>
+                                <?php if ($has_override): ?>
+                                    <span style="color:#d63638;">✏️ Edytowany</span><br>
+                                    <button class="button button-small edit-match-btn" 
+                                            data-match-id="<?php echo esc_attr($match['match_id']); ?>"
+                                            data-round="<?php echo esc_attr($match['round']); ?>">
+                                        Edytuj
+                                    </button>
+                                    <button class="button button-small restore-match-btn" 
+                                            data-match-id="<?php echo esc_attr($match['match_id']); ?>">
+                                        Przywróć z API
+                                    </button>
+                                <?php else: ?>
+                                    <button class="button button-small edit-match-btn" 
+                                            data-match-id="<?php echo esc_attr($match['match_id']); ?>"
+                                            data-round="<?php echo esc_attr($match['round']); ?>">
+                                        Edytuj
+                                    </button>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php
+            }
+            ?>
+        </div>
+        
+        <!-- Modal edycji meczu -->
+        <div id="edit-match-modal" style="display:none; position:fixed; z-index:9999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.6);">
+            <div style="background:white; margin:50px auto; padding:30px; width:600px; max-width:90%; border-radius:8px; position:relative;">
+                <span id="close-modal" style="position:absolute; top:15px; right:20px; font-size:28px; font-weight:bold; cursor:pointer;">&times;</span>
+                
+                <h2>Edytuj mecz</h2>
+                <form id="edit-match-form">
+                    <?php wp_nonce_field('sofascore_edit_match', 'nonce'); ?>
+                    <input type="hidden" id="edit_match_id" name="match_id">
+                    <input type="hidden" id="edit_round" name="round">
+                    
+                    <table class="form-table">
+                        <tr>
+                            <th><label for="edit_home_team">Drużyna gospodarzy</label></th>
+                            <td><input type="text" id="edit_home_team" name="home_team" class="regular-text" readonly style="background:#f0f0f0;"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_away_team">Drużyna gości</label></th>
+                            <td><input type="text" id="edit_away_team" name="away_team" class="regular-text" readonly style="background:#f0f0f0;"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_home_score">Wynik gospodarzy</label></th>
+                            <td><input type="number" id="edit_home_score" name="home_score" min="0" max="20" style="width:80px;"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_away_score">Wynik gości</label></th>
+                            <td><input type="number" id="edit_away_score" name="away_score" min="0" max="20" style="width:80px;"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_timestamp">Data i godzina</label></th>
+                            <td><input type="datetime-local" id="edit_timestamp" name="timestamp" class="regular-text"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="edit_status">Status</label></th>
+                            <td>
+                                <select id="edit_status" name="status" class="regular-text">
+                                    <option value="Ended">Ended (Zakończony)</option>
+                                    <option value="Postponed">Postponed (Przełożony)</option>
+                                    <option value="Scheduled">Scheduled (Zaplanowany)</option>
+                                    <option value="Not started">Not started (Niezaplanowany)</option>
+                                </select>
+                            </td>
+                        </tr>
+                    </table>
+                    
+                    <p class="submit">
+                        <button type="submit" class="button button-primary">💾 Zapisz zmiany</button>
+                        <button type="button" id="cancel-edit" class="button">Anuluj</button>
+                    </p>
+                </form>
+            </div>
+        </div>
+        
+        <script>
+        jQuery(document).ready(function($) {
+            // Otwórz modal
+            $('.edit-match-btn').on('click', function() {
+                var matchId = $(this).data('match-id');
+                var round = $(this).data('round');
+                
+                // Pobierz dane meczu
+                $.post(ajaxurl, {
+                    action: 'get_match_override_data',
+                    match_id: matchId,
+                    round: round,
+                    nonce: '<?php echo wp_create_nonce("sofascore_edit_match"); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        var data = response.data;
+                        $('#edit_match_id').val(matchId);
+                        $('#edit_round').val(round);
+                        $('#edit_home_team').val(data.home_team);
+                        $('#edit_away_team').val(data.away_team);
+                        $('#edit_home_score').val(data.home_score || '');
+                        $('#edit_away_score').val(data.away_score || '');
+                        $('#edit_timestamp').val(data.timestamp_formatted);
+                        $('#edit_status').val(data.status);
+                        
+                        $('#edit-match-modal').show();
+                    } else {
+                        alert('Błąd: ' + response.data.message);
+                    }
+                });
+            });
+            
+            // Zamknij modal
+            $('#close-modal, #cancel-edit').on('click', function() {
+                $('#edit-match-modal').hide();
+            });
+            
+            // Zapisz zmiany
+            $('#edit-match-form').on('submit', function(e) {
+                e.preventDefault();
+                
+                var formData = $(this).serializeArray();
+                var postData = {
+                    action: 'save_match_override'
+                };
+                
+                $.each(formData, function(i, field) {
+                    postData[field.name] = field.value;
+                });
+                
+                var submitBtn = $(this).find('button[type=submit]');
+                submitBtn.prop('disabled', true).text('Zapisywanie...');
+                
+                $.post(ajaxurl, postData, function(response) {
+                    if (response.success) {
+                        alert('✅ ' + response.data.message);
+                        location.reload();
+                    } else {
+                        alert('❌ ' + response.data.message);
+                    }
+                }).always(function() {
+                    submitBtn.prop('disabled', false).text('💾 Zapisz zmiany');
+                });
+            });
+            
+            // Przywróć z API
+            $('.restore-match-btn').on('click', function() {
+                if (!confirm('Czy na pewno chcesz przywrócić oryginalne dane z API? Ręczne zmiany zostaną utracone.')) {
+                    return;
+                }
+                
+                var matchId = $(this).data('match-id');
+                var btn = $(this);
+                
+                btn.prop('disabled', true).text('Przywracanie...');
+                
+                $.post(ajaxurl, {
+                    action: 'remove_match_override',
+                    match_id: matchId,
+                    nonce: '<?php echo wp_create_nonce("sofascore_edit_match"); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        alert('✅ ' + response.data.message);
+                        location.reload();
+                    } else {
+                        alert('❌ ' + response.data.message);
+                    }
+                }).always(function() {
+                    btn.prop('disabled', false).text('Przywróć z API');
+                });
+            });
+        });
+        </script>
+        
+        <style>
+        .wp-list-table tr[style*="background:#fffbcc"] {
+            border-left: 4px solid #f0c420;
+        }
+        </style>
+        <?php
+    }
+    
+    /**
+     * AJAX: Pobierz dane meczu do edycji
+     */
+    public function ajax_get_match_override_data() {
+        check_ajax_referer('sofascore_edit_match', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+        
+        $match_id = sanitize_text_field($_POST['match_id']);
+        $round = intval($_POST['round']);
+        
+        // Pobierz dane z zapisanych rund
+        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        $overrides = get_option('sofascore_match_overrides', array());
+        
+        if (!isset($saved_rounds[$round])) {
+            wp_send_json_error(array('message' => 'Kolejka nie znaleziona'));
+        }
+        
+        $events = $saved_rounds[$round]['data']['events'] ?? array();
+        $match_event = null;
+        
+        foreach ($events as $event) {
+            if (($event['id'] ?? '') == $match_id) {
+                $match_event = $event;
+                break;
+            }
+        }
+        
+        if (!$match_event) {
+            wp_send_json_error(array('message' => 'Mecz nie znaleziony'));
+        }
+        
+        // Użyj override jeśli istnieje
+        if (isset($overrides[$match_id])) {
+            $override = $overrides[$match_id];
+            $data = array(
+                'home_team' => $override['home_team'],
+                'away_team' => $override['away_team'],
+                'home_score' => $override['home_score'],
+                'away_score' => $override['away_score'],
+                'timestamp' => $override['timestamp'],
+                'timestamp_formatted' => date('Y-m-d\TH:i', $override['timestamp']),
+                'status' => $override['status']
+            );
+        } else {
+            // Dane z API
+            $data = array(
+                'home_team' => $match_event['homeTeam']['name'] ?? '',
+                'away_team' => $match_event['awayTeam']['name'] ?? '',
+                'home_score' => $match_event['homeScore']['current'] ?? '',
+                'away_score' => $match_event['awayScore']['current'] ?? '',
+                'timestamp' => $match_event['startTimestamp'] ?? time(),
+                'timestamp_formatted' => date('Y-m-d\TH:i', $match_event['startTimestamp'] ?? time()),
+                'status' => $match_event['status']['description'] ?? 'Scheduled'
+            );
+        }
+        
+        wp_send_json_success($data);
+    }
+    
+    /**
+     * AJAX: Zapisz ręczną edycję meczu
+     */
+    public function ajax_save_match_override() {
+        check_ajax_referer('sofascore_edit_match', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+        
+        $match_id = sanitize_text_field($_POST['match_id']);
+        $round = intval($_POST['round']);
+        $home_team = sanitize_text_field($_POST['home_team']);
+        $away_team = sanitize_text_field($_POST['away_team']);
+        $home_score = isset($_POST['home_score']) && $_POST['home_score'] !== '' ? intval($_POST['home_score']) : null;
+        $away_score = isset($_POST['away_score']) && $_POST['away_score'] !== '' ? intval($_POST['away_score']) : null;
+        $timestamp_str = sanitize_text_field($_POST['timestamp']);
+        $status = sanitize_text_field($_POST['status']);
+        
+        // Konwertuj timestamp
+        $timestamp = strtotime($timestamp_str);
+        if (!$timestamp) {
+            $timestamp = time();
+        }
+        
+        // Pobierz obecne overrides
+        $overrides = get_option('sofascore_match_overrides', array());
+        
+        // Zapisz override
+        $overrides[$match_id] = array(
+            'round' => $round,
+            'home_team' => $home_team,
+            'away_team' => $away_team,
+            'home_score' => $home_score,
+            'away_score' => $away_score,
+            'timestamp' => $timestamp,
+            'status' => $status,
+            'edited_at' => current_time('Y-m-d H:i:s'),
+            'edited_by' => get_current_user_id()
+        );
+        
+        update_option('sofascore_match_overrides', $overrides);
+        
+        wp_send_json_success(array('message' => 'Mecz został zaktualizowany'));
+    }
+    
+    /**
+     * AJAX: Usuń ręczną edycję - przywróć dane z API
+     */
+    public function ajax_remove_match_override() {
+        check_ajax_referer('sofascore_edit_match', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+        
+        $match_id = sanitize_text_field($_POST['match_id']);
+        
+        // Pobierz obecne overrides
+        $overrides = get_option('sofascore_match_overrides', array());
+        
+        if (isset($overrides[$match_id])) {
+            unset($overrides[$match_id]);
+            update_option('sofascore_match_overrides', $overrides);
+            
+            wp_send_json_success(array('message' => 'Dane z API zostały przywrócone'));
+        } else {
+            wp_send_json_error(array('message' => 'Brak ręcznej edycji dla tego meczu'));
         }
     }
     
