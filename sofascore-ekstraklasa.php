@@ -1030,9 +1030,16 @@ class SofaScoreEkstraklasa {
         // Pobierz overrides i zastosuj je do eventów
         $overrides = get_option('sofascore_match_overrides', array());
         $events_with_overrides = array();
+        $seen_match_ids = array();
+        $seen_matches_signature = array();
         
         foreach ($data['events'] as $event) {
             $match_id = $event['id'] ?? null;
+            
+            // Pomiń duplikaty - ten sam match_id
+            if ($match_id && isset($seen_match_ids[$match_id])) {
+                continue;
+            }
             
             // Zastosuj override jeśli istnieje
             if ($match_id && isset($overrides[$match_id])) {
@@ -1060,7 +1067,38 @@ class SofaScoreEkstraklasa {
                 }
             }
             
+            // Deduplikacja po drużynach + data
+            $home_team = strtolower(trim($event['homeTeam']['name'] ?? ''));
+            $away_team = strtolower(trim($event['awayTeam']['name'] ?? ''));
+            $match_date = isset($event['startTimestamp']) ? date('Y-m-d', $event['startTimestamp']) : 'nodate';
+            $signature = $home_team . '|' . $away_team . '|' . $match_date;
+            
+            // Pomiń jeśli taki mecz już był (te same drużyny, ta sama data)
+            if (isset($seen_matches_signature[$signature])) {
+                // Priorytet dla meczu z override
+                $has_override = $match_id && isset($overrides[$match_id]);
+                if (!$has_override) {
+                    // Ten mecz nie ma override, a już mamy taki mecz w liście - pomiń
+                    continue;
+                } else {
+                    // Ten mecz ma override - usuń poprzedni i dodaj ten
+                    $events_with_overrides = array_filter($events_with_overrides, function($m) use ($signature, $home_team, $away_team, $match_date) {
+                        $m_home = strtolower(trim($m['homeTeam']['name'] ?? ''));
+                        $m_away = strtolower(trim($m['awayTeam']['name'] ?? ''));
+                        $m_date = isset($m['startTimestamp']) ? date('Y-m-d', $m['startTimestamp']) : 'nodate';
+                        $m_sig = $m_home . '|' . $m_away . '|' . $m_date;
+                        return $m_sig !== $signature;
+                    });
+                }
+            }
+            
             $events_with_overrides[] = $event;
+            
+            // Zaznacz jako użyty
+            if ($match_id) {
+                $seen_match_ids[$match_id] = true;
+            }
+            $seen_matches_signature[$signature] = true;
         }
         
         // Filtruj mecze - usuń postponed (PO zastosowaniu overrides)
