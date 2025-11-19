@@ -578,13 +578,19 @@ class SofaScoreEkstraklasa {
         // Pobierz overrides
         $overrides = get_option('sofascore_match_overrides', array());
         
-        // Zbierz wszystkie mecze Wisły Płock
+        // Zbierz wszystkie mecze Wisły Płock (z deduplikacją po match_id)
         $wisla_matches = array();
+        $seen_match_ids = array();
         
         foreach ($saved_rounds as $round_num => $round_data) {
             if (isset($round_data['data']['events'])) {
                 foreach ($round_data['data']['events'] as $match) {
                     $match_id = $match['id'] ?? null;
+                    
+                    // Pomiń duplikaty - ten sam match_id
+                    if ($match_id && isset($seen_match_ids[$match_id])) {
+                        continue;
+                    }
                     
                     // Zastosuj override jeśli istnieje
                     if ($match_id && isset($overrides[$match_id])) {
@@ -601,6 +607,13 @@ class SofaScoreEkstraklasa {
                         if ($override['away_score'] !== null) {
                             $match['awayScore']['current'] = $override['away_score'];
                         }
+                        // Wyniki do przerwy z override
+                        if (isset($override['home_score_ht']) && $override['home_score_ht'] !== null) {
+                            $match['homeScore']['period1'] = $override['home_score_ht'];
+                        }
+                        if (isset($override['away_score_ht']) && $override['away_score_ht'] !== null) {
+                            $match['awayScore']['period1'] = $override['away_score_ht'];
+                        }
                     }
                     
                     // Sprawdź czy Wisła Płock gra w tym meczu
@@ -612,6 +625,11 @@ class SofaScoreEkstraklasa {
                     if ($is_wisla_match) {
                         $match['round_number'] = $round_num;
                         $wisla_matches[] = $match;
+                        
+                        // Zaznacz że ten match_id został już użyty
+                        if ($match_id) {
+                            $seen_match_ids[$match_id] = true;
+                        }
                     }
                 }
             }
