@@ -1038,9 +1038,13 @@ class SofaScoreEkstraklasa {
                     $status = $match['status']['description'] ?? '';
                     $is_finished = (strtolower($status) === 'ended' || strtolower($match['status']['type'] ?? '') === 'finished');
                     
-                    // Dla zakończonych meczów pobierz szczegóły z wynikami
+                    // Sprawdź czy mecz ma ręczny override
+                    $match_id = $match['id'] ?? null;
+                    $has_manual_override = $match_id && isset($overrides[$match_id]);
+                    
+                    // Dla zakończonych meczów pobierz szczegóły z wynikami (tylko jeśli NIE ma override)
                     $event_details = null;
-                    if ($is_finished && isset($match['id'])) {
+                    if ($is_finished && isset($match['id']) && !$has_manual_override) {
                         $details_result = $this->get_event_details($match['id']);
                         if ($details_result['success']) {
                             $event_details = $details_result['data'];
@@ -1056,7 +1060,7 @@ class SofaScoreEkstraklasa {
                         <div class="match-teams">
                             <span class="home-team"><?php echo esc_html($match['homeTeam']['name']); ?></span>
                             <span class="vs">
-                                <?php if ($is_finished && $event_details && isset($event_details['event']['homeScore'], $event_details['event']['awayScore'])): ?>
+                                <?php if ($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)): ?>
                                     <span class="match-separator">-</span>
                                 <?php else: ?>
                                     vs
@@ -1065,11 +1069,19 @@ class SofaScoreEkstraklasa {
                             <span class="away-team"><?php echo esc_html($match['awayTeam']['name']); ?></span>
                         </div>
                         <div class="match-info">
-                            <?php if ($is_finished && $event_details && isset($event_details['event']['homeScore'], $event_details['event']['awayScore'])): ?>
-                                <span class="match-result">
-                                    <strong><?php echo $event_details['event']['homeScore']['current']; ?>:<?php echo $event_details['event']['awayScore']['current']; ?></strong> 
-                                    <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
-                                </span>
+                            <?php if ($is_finished): ?>
+                                <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
+                                    <span class="match-result">
+                                        <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                    </span>
+                                <?php elseif ($event_details && isset($event_details['event']['homeScore']['current'], $event_details['event']['awayScore']['current'])): ?>
+                                    <span class="match-result">
+                                        <strong><?php echo $event_details['event']['homeScore']['current']; ?>:<?php echo $event_details['event']['awayScore']['current']; ?></strong> 
+                                        <?php if (isset($event_details['event']['homeScore']['period1'], $event_details['event']['awayScore']['period1'])): ?>
+                                            <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
+                                        <?php endif; ?>
+                                    </span>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
@@ -1293,6 +1305,9 @@ class SofaScoreEkstraklasa {
      * Renderuj tabelę terminarza Wisły Płock
      */
     private function render_wisla_fixtures_table($matches, $atts) {
+        // Pobierz overrides
+        $overrides = get_option('sofascore_match_overrides', array());
+        
         ob_start();
         ?>
                  <div class="terminarz-container wisla-terminarz">
@@ -1307,9 +1322,13 @@ class SofaScoreEkstraklasa {
                     $status = $match['status']['description'] ?? '';
                     $is_finished = (strtolower($status) === 'ended' || strtolower($match['status']['type'] ?? '') === 'finished');
                     
-                    // Dla zakończonych meczów pobierz szczegóły z wynikami
+                    // Sprawdź czy mecz ma ręczny override
+                    $match_id = $match['id'] ?? null;
+                    $has_manual_override = $match_id && isset($overrides[$match_id]);
+                    
+                    // Dla zakończonych meczów pobierz szczegóły z wynikami (tylko jeśli NIE ma override)
                     $event_details = null;
-                    if ($is_finished && isset($match['id'])) {
+                    if ($is_finished && isset($match['id']) && !$has_manual_override) {
                         $details_result = $this->get_event_details($match['id']);
                         if ($details_result['success']) {
                             $event_details = $details_result['data'];
@@ -1333,7 +1352,7 @@ class SofaScoreEkstraklasa {
                                 <?php echo esc_html($match['homeTeam']['name']); ?>
                             </span>
                             <span class="vs">
-                                <?php if ($is_finished && $event_details && isset($event_details['event']['homeScore'], $event_details['event']['awayScore'])): ?>
+                                <?php if ($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)): ?>
                                     <span class="match-separator">-</span>
                                 <?php else: ?>
                                     vs
@@ -1344,11 +1363,19 @@ class SofaScoreEkstraklasa {
                             </span>
                         </div>
                         <div class="match-info">
-                            <?php if ($is_finished && $event_details && isset($event_details['event']['homeScore'], $event_details['event']['awayScore'])): ?>
-                                <span class="match-result">
-                                    <strong><?php echo $event_details['event']['homeScore']['current']; ?>:<?php echo $event_details['event']['awayScore']['current']; ?></strong> 
-                                    <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
-                                </span>
+                            <?php if ($is_finished): ?>
+                                <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
+                                    <span class="match-result">
+                                        <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                    </span>
+                                <?php elseif ($event_details && isset($event_details['event']['homeScore']['current'], $event_details['event']['awayScore']['current'])): ?>
+                                    <span class="match-result">
+                                        <strong><?php echo $event_details['event']['homeScore']['current']; ?>:<?php echo $event_details['event']['awayScore']['current']; ?></strong> 
+                                        <?php if (isset($event_details['event']['homeScore']['period1'], $event_details['event']['awayScore']['period1'])): ?>
+                                            <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
+                                        <?php endif; ?>
+                                    </span>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
