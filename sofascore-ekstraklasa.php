@@ -578,9 +578,10 @@ class SofaScoreEkstraklasa {
         // Pobierz overrides
         $overrides = get_option('sofascore_match_overrides', array());
         
-        // Zbierz wszystkie mecze Wisły Płock (z deduplikacją po match_id)
+        // Zbierz wszystkie mecze Wisły Płock (z deduplikacją po match_id i drużynach+dacie)
         $wisla_matches = array();
         $seen_match_ids = array();
+        $seen_matches_signature = array(); // Deduplikacja po drużynach + dacie
         
         foreach ($saved_rounds as $round_num => $round_data) {
             if (isset($round_data['data']['events'])) {
@@ -623,6 +624,31 @@ class SofaScoreEkstraklasa {
                     );
                     
                     if ($is_wisla_match) {
+                        // Utwórz unikalny sygnaturę meczu na podstawie drużyn + data (dzień) + kolejka
+                        $home_team = strtolower(trim($match['homeTeam']['name']));
+                        $away_team = strtolower(trim($match['awayTeam']['name']));
+                        $match_date = isset($match['startTimestamp']) ? date('Y-m-d', $match['startTimestamp']) : 'nodate';
+                        $signature = $home_team . '|' . $away_team . '|' . $match_date . '|' . $round_num;
+                        
+                        // Pomiń jeśli taki mecz już był (te same drużyny, ta sama data, ta sama kolejka)
+                        if (isset($seen_matches_signature[$signature])) {
+                            // Priorytet dla meczu z override
+                            $has_override = $match_id && isset($overrides[$match_id]);
+                            if (!$has_override) {
+                                // Ten mecz nie ma override, a już mamy taki mecz w liście - pomiń
+                                continue;
+                            } else {
+                                // Ten mecz ma override - usuń poprzedni i dodaj ten
+                                $wisla_matches = array_filter($wisla_matches, function($m) use ($signature, $home_team, $away_team, $match_date, $round_num) {
+                                    $m_home = strtolower(trim($m['homeTeam']['name']));
+                                    $m_away = strtolower(trim($m['awayTeam']['name']));
+                                    $m_date = isset($m['startTimestamp']) ? date('Y-m-d', $m['startTimestamp']) : 'nodate';
+                                    $m_sig = $m_home . '|' . $m_away . '|' . $m_date . '|' . $m['round_number'];
+                                    return $m_sig !== $signature;
+                                });
+                            }
+                        }
+                        
                         $match['round_number'] = $round_num;
                         $wisla_matches[] = $match;
                         
@@ -630,6 +656,9 @@ class SofaScoreEkstraklasa {
                         if ($match_id) {
                             $seen_match_ids[$match_id] = true;
                         }
+                        
+                        // Zaznacz sygnaturę meczu
+                        $seen_matches_signature[$signature] = true;
                     }
                 }
             }
