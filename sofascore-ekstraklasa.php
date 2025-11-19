@@ -6098,21 +6098,37 @@ class SofaScoreEkstraklasa {
         $saved_rounds = get_option('sofascore_saved_rounds', array());
         
         if (!empty($saved_rounds)) {
-            foreach ($saved_rounds as $round_key => $round_data) {
-                $round_id = $round_data['id'];
-                $season_id = $round_data['season_id'];
-                $tournament_id = $round_data['tournament_id'];
+            $current_season = '76477'; // Ekstraklasa 2024/2025
+            $updated_count = 0;
+            
+            foreach ($saved_rounds as $round_number => $round_data) {
+                // Pobierz świeże dane z API
+                $result = $this->get_round_fixtures($current_season, $round_number);
                 
-                // Zaktualizuj dane dla tej kolejki
-                $this->fetch_and_save_round_data($round_id, $season_id, $tournament_id, $round_key);
+                if ($result['success']) {
+                    // Zaktualizuj dane
+                    $saved_rounds[$round_number] = array(
+                        'data' => $result['data'],
+                        'updated' => current_time('Y-m-d H:i:s'),
+                        'matches_count' => count($result['data']['events'] ?? array())
+                    );
+                    $updated_count++;
+                }
+                
+                // Małe opóźnienie między zapytaniami (żeby nie przytłoczyć API)
+                usleep(200000); // 0.2 sekundy
             }
+            
+            // Zapisz zaktualizowane dane
+            update_option('sofascore_saved_rounds', $saved_rounds);
             
             // Zapisz czas ostatniego odświeżania
             update_option('sofascore_last_auto_refresh', time());
             
             // Loguj odświeżanie
             error_log(sprintf(
-                'SofaScore Auto-Refresh: Zaktualizowano %d kolejek o %s',
+                'SofaScore Auto-Refresh: Zaktualizowano %d/%d kolejek o %s',
+                $updated_count,
                 count($saved_rounds),
                 date('Y-m-d H:i:s')
             ));
