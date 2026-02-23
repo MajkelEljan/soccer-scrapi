@@ -63,6 +63,7 @@ class SofaScoreEkstraklasa {
         add_action('wp_ajax_sofascore_rescan_daily_plan', array($this, 'ajax_rescan_daily_plan'));
         add_action('wp_ajax_sofascore_reset_match', array($this, 'ajax_reset_match'));
         add_action('wp_ajax_sofascore_get_daily_plan', array($this, 'ajax_get_daily_plan'));
+        add_action('wp_ajax_sofascore_backfill_incidents_media', array($this, 'ajax_backfill_incidents_media'));
         
         // Rejestracja shortcodes - Ekstraklasa
         add_shortcode('tabela_ekstraklasa', array($this, 'shortcode_tabela'));
@@ -81,6 +82,7 @@ class SofaScoreEkstraklasa {
         add_action('wp', array($this, 'schedule_updates'));
         add_action('sofascore_update_data', array($this, 'update_all_data'));
         add_action('sofascore_auto_refresh', array($this, 'auto_refresh_data'));
+        add_action('sofascore_check_media', array($this, 'hourly_media_check'));
         add_filter('cron_schedules', array($this, 'add_cron_intervals'));
         
         // Hook aktywacji/deaktywacji
@@ -201,6 +203,16 @@ class SofaScoreEkstraklasa {
         }
         
         return $result;
+    }
+
+    public function get_event_incidents($event_id) {
+        $endpoint = "/event/{$event_id}/incidents";
+        return $this->make_api_request($endpoint);
+    }
+
+    public function get_event_media($event_id) {
+        $endpoint = "/event/{$event_id}/media";
+        return $this->make_api_request($endpoint);
     }
     
     /**
@@ -1113,6 +1125,10 @@ class SofaScoreEkstraklasa {
         });
         
         $events = array_slice($filtered_events, 0, intval($atts['limit']));
+
+        $show_incidents = get_option('sofascore_show_incidents', 0);
+        $show_media = get_option('sofascore_show_media', 0);
+        $has_details = ($show_incidents || $show_media);
         
         ob_start();
         ?>
@@ -1153,42 +1169,100 @@ class SofaScoreEkstraklasa {
                         $status = '';
                     }
                     ?>
-                    <div class="<?php echo $match_class; ?>">
-                        <div class="match-teams">
-                            <span class="home-team"><?php echo esc_html($match['homeTeam']['name']); ?></span>
-                            <span class="vs">
-                                <?php if ($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)): ?>
-                                    <span class="match-separator">-</span>
+                    <?php
+                    $event_id = $match['id'] ?? null;
+                    $match_incidents = array();
+                    $match_media = array();
+                    $has_expandable = false;
+                    if ($is_finished && $event_id && $has_details) {
+                        if ($show_incidents) {
+                            $match_incidents = $this->get_db_incidents($event_id);
+                        }
+                        if ($show_media) {
+                            $match_media = $this->get_db_media($event_id);
+                        }
+                        $has_expandable = (!empty($match_incidents) || !empty($match_media));
+                    }
+                    ?>
+                    <div class="match-wrapper">
+                        <div class="<?php echo $match_class; ?><?php echo $has_expandable ? ' match-expandable' : ''; ?>" <?php if ($has_expandable): ?>role="button" tabindex="0" aria-expanded="false"<?php endif; ?>>
+                            <div class="match-teams">
+                                <span class="home-team"><?php echo esc_html($match['homeTeam']['name']); ?></span>
+                                <span class="vs">
+                                    <?php if ($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)): ?>
+                                        <span class="match-separator">-</span>
+                                    <?php else: ?>
+                                        vs
+                                    <?php endif; ?>
+                                </span>
+                                <span class="away-team"><?php echo esc_html($match['awayTeam']['name']); ?></span>
+                            </div>
+                            <div class="match-info">
+                                <?php if ($is_finished): ?>
+                                    <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
+                                        <span class="match-result">
+                                            <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                            <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
+                                                <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
+                                            <?php endif; ?>
+                                        </span>
+                                    <?php elseif ($event_details && isset($event_details['event']['homeScore']['current'], $event_details['event']['awayScore']['current'])): ?>
+                                        <span class="match-result">
+                                            <strong><?php echo $event_details['event']['homeScore']['current']; ?>:<?php echo $event_details['event']['awayScore']['current']; ?></strong> 
+                                            <?php if (isset($event_details['event']['homeScore']['period1'], $event_details['event']['awayScore']['period1'])): ?>
+                                                <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
+                                            <?php endif; ?>
+                                        </span>
+                                    <?php endif; ?>
+                                    <?php if ($has_expandable): ?>
+                                        <span class="match-expand-icon">▼</span>
+                                    <?php endif; ?>
                                 <?php else: ?>
-                                    vs
+                                    <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
+                                    <?php if (!empty($status)): ?>
+                                        <span class="match-status"><?php echo esc_html($status); ?></span>
+                                    <?php endif; ?>
                                 <?php endif; ?>
-                            </span>
-                            <span class="away-team"><?php echo esc_html($match['awayTeam']['name']); ?></span>
+                            </div>
                         </div>
-                        <div class="match-info">
-                            <?php if ($is_finished): ?>
-                                <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
-                                    <span class="match-result">
-                                        <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
-                                        <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
-                                            <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
-                                        <?php endif; ?>
-                                    </span>
-                                <?php elseif ($event_details && isset($event_details['event']['homeScore']['current'], $event_details['event']['awayScore']['current'])): ?>
-                                    <span class="match-result">
-                                        <strong><?php echo $event_details['event']['homeScore']['current']; ?>:<?php echo $event_details['event']['awayScore']['current']; ?></strong> 
-                                        <?php if (isset($event_details['event']['homeScore']['period1'], $event_details['event']['awayScore']['period1'])): ?>
-                                            <span class="halftime-result">(<?php echo $event_details['event']['homeScore']['period1']; ?>:<?php echo $event_details['event']['awayScore']['period1']; ?>)</span>
-                                        <?php endif; ?>
-                                    </span>
-                                <?php endif; ?>
-                            <?php else: ?>
-                                <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
-                                <?php if (!empty($status)): ?>
-                                    <span class="match-status"><?php echo esc_html($status); ?></span>
-                                <?php endif; ?>
+                        <?php if ($has_expandable): ?>
+                        <div class="match-details" style="display:none;">
+                            <?php if (!empty($match_incidents)): ?>
+                            <div class="match-incidents">
+                                <div class="details-section-title">Przebieg meczu</div>
+                                <?php foreach ($match_incidents as $inc): ?>
+                                    <?php echo $this->render_incident_html($inc); ?>
+                                <?php endforeach; ?>
+                            </div>
+                            <?php endif; ?>
+                            <?php if (!empty($match_media)): ?>
+                            <div class="match-media">
+                                <div class="details-section-title">Skróty / Media</div>
+                                <?php foreach ($match_media as $media): ?>
+                                    <?php
+                                    $yt_id = null;
+                                    $url = $media['url'] ?? '';
+                                    if (preg_match('/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/', $url, $ym)) {
+                                        $yt_id = $ym[1];
+                                    }
+                                    ?>
+                                    <?php if ($yt_id): ?>
+                                    <div class="media-embed">
+                                        <div class="media-title"><?php echo esc_html($media['title'] ?? ''); ?></div>
+                                        <div class="youtube-container">
+                                            <iframe src="https://www.youtube.com/embed/<?php echo esc_attr($yt_id); ?>" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe>
+                                        </div>
+                                    </div>
+                                    <?php else: ?>
+                                    <div class="media-link">
+                                        <a href="<?php echo esc_url($url); ?>" target="_blank" rel="noopener"><?php echo esc_html($media['title'] ?? 'Obejrzyj'); ?></a>
+                                    </div>
+                                    <?php endif; ?>
+                                <?php endforeach; ?>
+                            </div>
                             <?php endif; ?>
                         </div>
+                        <?php endif; ?>
                     </div>
                 <?php endforeach; ?>
             </div>
@@ -1395,7 +1469,131 @@ class SofaScoreEkstraklasa {
                  border-left-width: 4px;
              }
          }
+
+        /* Expandable match details */
+        .match-wrapper {
+            border-bottom: 1px solid #eee;
+        }
+        .match-wrapper .match-item {
+            border-bottom: none;
+        }
+        .match-expandable {
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .match-expandable:hover {
+            background: #f8f9fa;
+        }
+        .match-expand-icon {
+            font-size: 0.7em;
+            color: #999;
+            margin-left: 8px;
+            transition: transform 0.25s;
+            display: inline-block;
+        }
+        .match-wrapper.open .match-expand-icon {
+            transform: rotate(180deg);
+        }
+        .match-details {
+            padding: 0 15px 15px 15px;
+            background: #fafbfc;
+            border-top: 1px solid #eee;
+        }
+        .details-section-title {
+            font-weight: 600;
+            font-size: 0.85em;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 12px 0 8px 0;
+        }
+        .incident-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 0;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+        .incident-time {
+            min-width: 40px;
+            font-weight: 600;
+            color: #666;
+            text-align: right;
+        }
+        .incident-icon {
+            min-width: 20px;
+            text-align: center;
+        }
+        .incident-text {
+            color: #333;
+        }
+        .incident-away {
+            padding-left: 20px;
+        }
+        .match-media {
+            margin-top: 10px;
+        }
+        .media-embed {
+            margin: 8px 0;
+        }
+        .media-title {
+            font-size: 0.85em;
+            color: #555;
+            margin-bottom: 6px;
+        }
+        .youtube-container {
+            position: relative;
+            width: 100%;
+            max-width: 560px;
+            padding-bottom: min(315px, 56.25%);
+            height: 0;
+            overflow: hidden;
+            border-radius: 6px;
+        }
+        .youtube-container iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .media-link {
+            margin: 6px 0;
+        }
+        .media-link a {
+            color: #0073aa;
+            text-decoration: none;
+        }
+        .media-link a:hover {
+            text-decoration: underline;
+        }
         </style>
+
+        <?php if ($has_details): ?>
+        <script>
+        (function() {
+            document.querySelectorAll('.match-expandable').forEach(function(el) {
+                el.addEventListener('click', function() {
+                    var wrapper = el.closest('.match-wrapper');
+                    var details = wrapper.querySelector('.match-details');
+                    if (!details) return;
+                    var isOpen = wrapper.classList.contains('open');
+                    wrapper.classList.toggle('open');
+                    el.setAttribute('aria-expanded', !isOpen);
+                    details.style.display = isOpen ? 'none' : 'block';
+                });
+                el.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        el.click();
+                    }
+                });
+            });
+        })();
+        </script>
+        <?php endif; ?>
+
         <?php
         
         return ob_get_clean();
@@ -2314,6 +2512,10 @@ class SofaScoreEkstraklasa {
                 wp_schedule_event(time(), 'every_minute', 'sofascore_auto_refresh');
             }
         }
+
+        if (!wp_next_scheduled('sofascore_check_media')) {
+            wp_schedule_event(time(), 'hourly', 'sofascore_check_media');
+        }
     }
     
     /**
@@ -2333,8 +2535,9 @@ class SofaScoreEkstraklasa {
      * Aktywacja pluginu
      */
     public function activate() {
-        // Zaplanuj pierwsze zadanie
+        // Zaplanuj pierwsze zadania
         wp_schedule_event(time(), 'hourly', 'sofascore_update_data');
+        wp_schedule_event(time(), 'hourly', 'sofascore_check_media');
         
         // Utwórz tabele bazy danych
         $this->create_database_tables();
@@ -2401,6 +2604,223 @@ class SofaScoreEkstraklasa {
         } else {
             error_log('SofaScore Plugin: Tabela ' . $table_name . ' już istnieje - pomijam tworzenie.');
         }
+
+        // --- Tabela incidents (gole, kartki, zmiany) ---
+        $this->create_table_if_not_exists(
+            $wpdb->prefix . 'sofascore_incidents',
+            "CREATE TABLE {$wpdb->prefix}sofascore_incidents (
+                id bigint(20) NOT NULL AUTO_INCREMENT,
+                event_id bigint(20) NOT NULL,
+                incident_type varchar(30) NOT NULL,
+                time int(4) DEFAULT NULL,
+                added_time int(4) DEFAULT NULL,
+                is_home tinyint(1) DEFAULT NULL,
+                player_name varchar(255) DEFAULT NULL,
+                player_id bigint(20) DEFAULT NULL,
+                assist_name varchar(255) DEFAULT NULL,
+                assist_id bigint(20) DEFAULT NULL,
+                incident_class varchar(30) DEFAULT NULL,
+                home_score int(3) DEFAULT NULL,
+                away_score int(3) DEFAULT NULL,
+                description varchar(255) DEFAULT NULL,
+                raw_json text DEFAULT NULL,
+                created_at timestamp DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY event_id_idx (event_id),
+                KEY incident_type_idx (incident_type)
+            ) {$wpdb->get_charset_collate()};"
+        );
+
+        // --- Tabela media (YouTube highlights) ---
+        $this->create_table_if_not_exists(
+            $wpdb->prefix . 'sofascore_media',
+            "CREATE TABLE {$wpdb->prefix}sofascore_media (
+                id bigint(20) NOT NULL AUTO_INCREMENT,
+                event_id bigint(20) NOT NULL,
+                title varchar(500) DEFAULT NULL,
+                subtitle varchar(500) DEFAULT NULL,
+                url varchar(1000) NOT NULL,
+                thumbnail_url varchar(1000) DEFAULT NULL,
+                media_type int(4) DEFAULT NULL,
+                source_url varchar(1000) DEFAULT NULL,
+                api_media_id bigint(20) DEFAULT NULL,
+                is_key_highlight tinyint(1) DEFAULT 0,
+                created_at timestamp DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY event_media_unique (event_id, api_media_id),
+                KEY event_id_idx (event_id)
+            ) {$wpdb->get_charset_collate()};"
+        );
+    }
+
+    private function create_table_if_not_exists($table_name, $sql) {
+        global $wpdb;
+        $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table_name)) === $table_name;
+        if (!$exists) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+            error_log('SofaScore Plugin: Tabela ' . $table_name . ' utworzona.');
+        }
+    }
+
+    public function fetch_and_store_incidents($event_id) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_incidents';
+
+        $result = $this->get_event_incidents($event_id);
+        if (!$result['success']) {
+            error_log("SofaScore: Nie udalo sie pobrac incidents dla event {$event_id}");
+            return false;
+        }
+
+        $incidents = $result['data']['incidents'] ?? array();
+        if (empty($incidents)) return 0;
+
+        $wpdb->delete($table, array('event_id' => $event_id), array('%d'));
+
+        $count = 0;
+        foreach ($incidents as $inc) {
+            $type = $inc['incidentType'] ?? null;
+            if (!$type || in_array($type, array('period'), true)) continue;
+
+            $player = $inc['player'] ?? null;
+            $assist = $inc['assist1'] ?? null;
+
+            $wpdb->insert($table, array(
+                'event_id'       => $event_id,
+                'incident_type'  => $type,
+                'time'           => $inc['time'] ?? null,
+                'added_time'     => $inc['addedTime'] ?? null,
+                'is_home'        => isset($inc['isHome']) ? ($inc['isHome'] ? 1 : 0) : null,
+                'player_name'    => $player ? ($player['shortName'] ?? $player['name'] ?? null) : null,
+                'player_id'      => $player['id'] ?? null,
+                'assist_name'    => $assist ? ($assist['shortName'] ?? $assist['name'] ?? null) : null,
+                'assist_id'      => $assist['id'] ?? null,
+                'incident_class' => $inc['incidentClass'] ?? null,
+                'home_score'     => $inc['homeScore'] ?? null,
+                'away_score'     => $inc['awayScore'] ?? null,
+                'description'    => $inc['description'] ?? ($inc['reason'] ?? null),
+                'raw_json'       => wp_json_encode($inc),
+            ), array('%d','%s','%d','%d','%d','%s','%d','%s','%d','%s','%d','%d','%s','%s'));
+
+            $count++;
+        }
+
+        error_log("SofaScore: Zapisano {$count} incidents dla event {$event_id}");
+        return $count;
+    }
+
+    public function fetch_and_store_media($event_id) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_media';
+
+        $result = $this->get_event_media($event_id);
+        if (!$result['success']) {
+            error_log("SofaScore: Nie udalo sie pobrac media dla event {$event_id}");
+            return false;
+        }
+
+        $media_items = $result['data']['media'] ?? array();
+        if (empty($media_items)) return 0;
+
+        $count = 0;
+        foreach ($media_items as $m) {
+            $api_id = $m['id'] ?? null;
+            $url    = $m['url'] ?? null;
+            if (!$url) continue;
+
+            $existing = $wpdb->get_var($wpdb->prepare(
+                "SELECT id FROM {$table} WHERE event_id = %d AND api_media_id = %d",
+                $event_id, $api_id
+            ));
+
+            $data = array(
+                'event_id'        => $event_id,
+                'title'           => $m['title'] ?? null,
+                'subtitle'        => $m['subtitle'] ?? null,
+                'url'             => $url,
+                'thumbnail_url'   => $m['thumbnailUrl'] ?? null,
+                'media_type'      => $m['mediaType'] ?? null,
+                'source_url'      => $m['sourceUrl'] ?? null,
+                'api_media_id'    => $api_id,
+                'is_key_highlight' => !empty($m['keyHighlight']) ? 1 : 0,
+            );
+
+            if ($existing) {
+                $wpdb->update($table, $data, array('id' => $existing));
+            } else {
+                $wpdb->insert($table, $data);
+                $count++;
+            }
+        }
+
+        error_log("SofaScore: Zapisano/zaktualizowano media dla event {$event_id} (nowe: {$count})");
+        return $count;
+    }
+
+    public function get_db_incidents($event_id) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_incidents';
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$table} WHERE event_id = %d ORDER BY time ASC, added_time ASC",
+            $event_id
+        ), ARRAY_A);
+    }
+
+    public function get_db_media($event_id) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_media';
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$table} WHERE event_id = %d ORDER BY is_key_highlight DESC, id ASC",
+            $event_id
+        ), ARRAY_A);
+    }
+
+    private function render_incident_html($inc) {
+        $time = intval($inc['time']);
+        $added = intval($inc['added_time'] ?? 0);
+        $time_str = $added > 0 ? "{$time}+{$added}'" : "{$time}'";
+        $type = $inc['incident_type'] ?? '';
+        $player = esc_html($inc['player_name'] ?? '');
+        $assist = esc_html($inc['assist_name'] ?? '');
+
+        switch ($type) {
+            case 'goal':
+                $icon = '⚽';
+                $class_extra = ($inc['incident_class'] === 'ownGoal') ? ' (sam.)' : '';
+                $class_extra .= ($inc['incident_class'] === 'penalty') ? ' (k.)' : '';
+                $score = '';
+                if ($inc['home_score'] !== null && $inc['away_score'] !== null) {
+                    $score = " ({$inc['home_score']}:{$inc['away_score']})";
+                }
+                $assist_str = $assist ? ", as. {$assist}" : '';
+                $text = "{$player}{$class_extra}{$assist_str}{$score}";
+                break;
+            case 'card':
+                $desc = strtolower($inc['incident_class'] ?? $inc['description'] ?? '');
+                if (strpos($desc, 'red') !== false || strpos($desc, 'yellowred') !== false) {
+                    $icon = '🟥';
+                } else {
+                    $icon = '🟨';
+                }
+                $text = $player;
+                break;
+            case 'substitution':
+                $icon = '🔄';
+                $text = $assist ? "{$assist} → {$player}" : $player;
+                break;
+            case 'injuryTime':
+                $icon = '⏱️';
+                $text = "Doliczony czas: {$inc['description']}";
+                break;
+            default:
+                $icon = '•';
+                $text = $player ?: ($inc['description'] ?? $type);
+                break;
+        }
+
+        $side_class = $inc['is_home'] ? 'incident-home' : 'incident-away';
+        return "<div class=\"incident-row {$side_class}\"><span class=\"incident-time\">{$time_str}</span> <span class=\"incident-icon\">{$icon}</span> <span class=\"incident-text\">{$text}</span></div>";
     }
 
     /**
@@ -2409,6 +2829,7 @@ class SofaScoreEkstraklasa {
     public function deactivate() {
         // Usuń zaplanowane zadania
         wp_clear_scheduled_hook('sofascore_update_data');
+        wp_clear_scheduled_hook('sofascore_check_media');
         
         // Wyczyść cache
         delete_transient('sofascore_standings_76477');
@@ -6490,6 +6911,7 @@ class SofaScoreEkstraklasa {
 
             // Przejścia stanów
             if ($api_type === 'finished') {
+                $was_not_finished = ($match['state'] !== 'finished');
                 $match['state'] = 'finished';
                 $match['minute'] = 90;
                 error_log(sprintf(
@@ -6497,6 +6919,10 @@ class SofaScoreEkstraklasa {
                     $match['home_team'], $match['away_team'],
                     $match['home_score'] ?? '-', $match['away_score'] ?? '-'
                 ));
+                if ($was_not_finished && $match['event_id']) {
+                    $this->fetch_and_store_incidents($match['event_id']);
+                    $plan['api_calls_today']++;
+                }
             } elseif ($api_type === 'inprogress') {
                 if (in_array($match['state'], ['checking', 'force_check'])) {
                     error_log(sprintf(
@@ -6522,6 +6948,33 @@ class SofaScoreEkstraklasa {
 
         update_option('sofascore_daily_plan', $plan, false);
         update_option('sofascore_last_auto_refresh', $now);
+    }
+
+    /**
+     * Co-godzinowe sprawdzanie mediów dla dzisiejszych zakończonych meczów.
+     * Highlights YouTube pojawiają się z opóźnieniem, dlatego sprawdzamy wielokrotnie.
+     */
+    public function hourly_media_check() {
+        $plan = get_option('sofascore_daily_plan', array());
+        $today = date('Y-m-d');
+
+        if (empty($plan) || ($plan['date'] ?? '') !== $today) {
+            return;
+        }
+
+        $checked = 0;
+        foreach ($plan['matches'] as $match) {
+            if ($match['state'] !== 'finished' || empty($match['event_id'])) {
+                continue;
+            }
+            $this->fetch_and_store_media($match['event_id']);
+            $checked++;
+            usleep(300000);
+        }
+
+        if ($checked > 0) {
+            error_log("SofaScore Media Check: Sprawdzono media dla {$checked} zakończonych meczów");
+        }
     }
     
     /**
@@ -6607,6 +7060,74 @@ class SofaScoreEkstraklasa {
     }
 
     /**
+     * Backfill: jednorazowe uzupełnienie incidents i media dla rozegranych meczów sezonu.
+     * Obsługuje przetwarzanie w partiach (batch) ze zwracaniem postępu.
+     */
+    public function ajax_backfill_incidents_media() {
+        check_ajax_referer('sofascore_settings', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        global $wpdb;
+        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        $offset = isset($_POST['offset']) ? intval($_POST['offset']) : 0;
+        $batch_size = 10;
+
+        $finished_events = array();
+        foreach ($saved_rounds as $round_data) {
+            $events = $round_data['data']['events'] ?? array();
+            foreach ($events as $event) {
+                $status_type = strtolower($event['status']['type'] ?? '');
+                if ($status_type === 'finished' && !empty($event['id'])) {
+                    $finished_events[] = intval($event['id']);
+                }
+            }
+        }
+        $finished_events = array_unique($finished_events);
+        sort($finished_events);
+
+        $total = count($finished_events);
+        $batch = array_slice($finished_events, $offset, $batch_size);
+        $processed = 0;
+        $inc_table = $wpdb->prefix . 'sofascore_incidents';
+        $med_table = $wpdb->prefix . 'sofascore_media';
+
+        foreach ($batch as $event_id) {
+            $has_incidents = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$inc_table} WHERE event_id = %d", $event_id
+            ));
+            if (!$has_incidents) {
+                $this->fetch_and_store_incidents($event_id);
+                usleep(300000);
+            }
+
+            $has_media = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$med_table} WHERE event_id = %d", $event_id
+            ));
+            if (!$has_media) {
+                $this->fetch_and_store_media($event_id);
+                usleep(300000);
+            }
+
+            $processed++;
+        }
+
+        $new_offset = $offset + $processed;
+        $done = ($new_offset >= $total);
+
+        wp_send_json_success(array(
+            'processed' => $processed,
+            'offset'    => $new_offset,
+            'total'     => $total,
+            'done'      => $done,
+            'message'   => $done
+                ? "Backfill zakończony: {$total} meczów przetworzonych."
+                : "Przetworzono {$new_offset}/{$total} meczów..."
+        ));
+    }
+
+    /**
      * Zastosuj timezone offset do timestampu
      */
     public function apply_timezone_offset($timestamp) {
@@ -6631,6 +7152,10 @@ class SofaScoreEkstraklasa {
         // Zapisz ustawienia automatycznego odświeżania
         $auto_refresh_enabled = isset($_POST['auto_refresh_enabled']) ? 1 : 0;
         update_option('sofascore_auto_refresh_enabled', $auto_refresh_enabled);
+
+        // Zapisz ustawienia wyświetlania incidents/media
+        update_option('sofascore_show_incidents', isset($_POST['show_incidents']) ? 1 : 0);
+        update_option('sofascore_show_media', isset($_POST['show_media']) ? 1 : 0);
         
         // Zapisz harmonogram dla każdego dnia tygodnia
         $days = array('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday');
@@ -7128,6 +7653,8 @@ class SofaScoreEkstraklasa {
     public function settings_page() {
         $timezone_offset = get_option('sofascore_timezone_offset', 0);
         $auto_refresh_enabled = get_option('sofascore_auto_refresh_enabled', 0);
+        $show_incidents = get_option('sofascore_show_incidents', 0);
+        $show_media = get_option('sofascore_show_media', 0);
         $schedule = get_option('sofascore_refresh_schedule', array());
         
         // Domyślne wartości dla harmonogramu
@@ -7184,6 +7711,21 @@ class SofaScoreEkstraklasa {
                             <p class="description">Po włączeniu, dane będą automatycznie odświeżane według harmonogramu poniżej.</p>
                         </td>
                     </tr>
+
+                    <tr>
+                        <th scope="row">Wyświetlanie szczegółów meczów</th>
+                        <td>
+                            <label style="display:block; margin-bottom:6px;">
+                                <input type="checkbox" name="show_incidents" id="show_incidents" value="1" <?php checked($show_incidents, 1); ?>>
+                                Pokazuj szczegóły meczów (strzelcy, kartki, zmiany)
+                            </label>
+                            <label style="display:block;">
+                                <input type="checkbox" name="show_media" id="show_media" value="1" <?php checked($show_media, 1); ?>>
+                                Pokazuj media (skróty meczów z YouTube)
+                            </label>
+                            <p class="description">Dane są pobierane i zapisywane niezależnie od tych ustawień. Przełączniki kontrolują tylko wyświetlanie w shortcodach.</p>
+                        </td>
+                    </tr>
                 </table>
                 
                 <h2>📅 Harmonogram automatycznego odświeżania</h2>
@@ -7232,9 +7774,16 @@ class SofaScoreEkstraklasa {
                 <h2>📋 Smart Scheduler — Plan dnia</h2>
                 <p class="description">Algorytm automatycznie skanuje harmonogram meczów raz dziennie i odpytuje API tylko podczas trwania meczów (co 1 minutę).</p>
                 
-                <div style="margin:15px 0; display:flex; gap:10px;">
+                <div style="margin:15px 0; display:flex; gap:10px; flex-wrap:wrap;">
                     <button type="button" id="btn-rescan-plan" class="button button-primary">🔄 Przeskanuj harmonogram na dziś</button>
                     <button type="button" id="btn-refresh-plan-view" class="button">📊 Odśwież widok</button>
+                    <button type="button" id="btn-backfill" class="button" style="background:#e7f5e7; border-color:#46b450;">📥 Uzupełnij incidents i media dla rozegranych meczów</button>
+                </div>
+                <div id="backfill-progress" style="display:none; margin:10px 0; padding:12px; background:#fff3cd; border:1px solid #ffc107; border-radius:4px;">
+                    <strong>Backfill:</strong> <span id="backfill-msg">Rozpoczynanie...</span>
+                    <div style="margin-top:8px; background:#eee; border-radius:4px; height:20px;">
+                        <div id="backfill-bar" style="height:100%; background:#46b450; border-radius:4px; width:0%; transition:width 0.3s;"></div>
+                    </div>
                 </div>
                 
                 <div id="daily-plan-status" style="margin:15px 0; padding:12px; background:#fff; border:1px solid #ddd; border-radius:4px;">
@@ -7390,6 +7939,43 @@ class SofaScoreEkstraklasa {
                 });
             });
             
+            // Backfill incidents i media
+            $('#btn-backfill').on('click', function() {
+                if (!confirm('Czy chcesz uzupełnić incidents i media dla wszystkich rozegranych meczów? Może to potrwać kilka minut.')) return;
+                var btn = $(this);
+                btn.prop('disabled', true);
+                $('#backfill-progress').show();
+
+                function runBatch(offset) {
+                    $.post(ajaxurl, {
+                        action: 'sofascore_backfill_incidents_media',
+                        nonce: settingsNonce,
+                        offset: offset
+                    }, function(response) {
+                        if (response.success) {
+                            var d = response.data;
+                            var pct = d.total > 0 ? Math.round((d.offset / d.total) * 100) : 100;
+                            $('#backfill-msg').text(d.message);
+                            $('#backfill-bar').css('width', pct + '%');
+                            if (!d.done) {
+                                runBatch(d.offset);
+                            } else {
+                                btn.prop('disabled', false);
+                                $('#backfill-bar').css('background', '#0073aa');
+                            }
+                        } else {
+                            $('#backfill-msg').text('Błąd: ' + (response.data ? response.data.message : 'nieznany'));
+                            btn.prop('disabled', false);
+                        }
+                    }).fail(function() {
+                        $('#backfill-msg').text('Błąd komunikacji z serwerem.');
+                        btn.prop('disabled', false);
+                    });
+                }
+
+                runBatch(0);
+            });
+
             // Załaduj plan przy wejściu na stronę
             loadPlan();
         });
