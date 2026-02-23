@@ -59,6 +59,11 @@ class SofaScoreEkstraklasa {
         add_action('wp_ajax_save_match_override', array($this, 'ajax_save_match_override'));
         add_action('wp_ajax_remove_match_override', array($this, 'ajax_remove_match_override'));
         
+        // AJAX handlers dla smart scheduler
+        add_action('wp_ajax_sofascore_rescan_daily_plan', array($this, 'ajax_rescan_daily_plan'));
+        add_action('wp_ajax_sofascore_reset_match', array($this, 'ajax_reset_match'));
+        add_action('wp_ajax_sofascore_get_daily_plan', array($this, 'ajax_get_daily_plan'));
+        
         // Rejestracja shortcodes - Ekstraklasa
         add_shortcode('tabela_ekstraklasa', array($this, 'shortcode_tabela'));
         add_shortcode('tabela_ekstraklasa_zamrozona', array($this, 'shortcode_tabela_zamrozona'));
@@ -2303,10 +2308,10 @@ class SofaScoreEkstraklasa {
             wp_schedule_event(time(), 'hourly', 'sofascore_update_data');
         }
         
-        // Zaplanuj auto-refresh jeśli jest włączony
+        // Zaplanuj auto-refresh jeśli jest włączony (co 1 minutę -- smart scheduler sam decyduje kiedy odpytywać)
         if (get_option('sofascore_auto_refresh_enabled', 0)) {
             if (!wp_next_scheduled('sofascore_auto_refresh')) {
-                wp_schedule_event(time(), 'every_5_minutes', 'sofascore_auto_refresh');
+                wp_schedule_event(time(), 'every_minute', 'sofascore_auto_refresh');
             }
         }
     }
@@ -6236,130 +6241,371 @@ class SofaScoreEkstraklasa {
      */
     public function add_cron_intervals($schedules) {
         $schedules['every_5_minutes'] = array(
-            'interval' => 300, // 5 minut w sekundach
+            'interval' => 300,
             'display'  => __('Co 5 minut')
+        );
+        $schedules['every_minute'] = array(
+            'interval' => 60,
+            'display'  => __('Co 1 minutę')
         );
         return $schedules;
     }
     
     /**
-     * Automatyczne odświeżanie danych (wykonywane co 5 minut)
+     * Zbuduj plan dnia -- skanuj saved_rounds i znajdź mecze z dzisiejszą datą.
+     * @return array Plan dnia
+     */
+    private function build_daily_plan() {
+        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        $today = date('Y-m-d');
+        $matches = array();
+
+        foreach ($saved_rounds as $round_number => $round_data) {
+            $events = $round_data['data']['events'] ?? array();
+            foreach ($events as $event) {
+                $ts = $event['startTimestamp'] ?? 0;
+                if (!$ts) continue;
+
+                $event_date = date('Y-m-d', $ts);
+                if ($event_date !== $today) continue;
+
+                $status_type = strtolower($event['status']['type'] ?? 'notstarted');
+                if ($status_type === 'finished') continue;
+
+                $matches[] = array(
+                    'round'           => intval($round_number),
+                    'event_id'        => $event['id'] ?? null,
+                    'start_time'      => $ts,
+                    'home_team'       => $event['homeTeam']['name'] ?? '?',
+                    'away_team'       => $event['awayTeam']['name'] ?? '?',
+                    'state'           => 'waiting',
+                    'checking_since'  => null,
+                    'api_status'      => $event['status']['description'] ?? null,
+                    'api_status_code' => $event['status']['code'] ?? null,
+                    'home_score'      => null,
+                    'away_score'      => null,
+                    'home_score_ht'   => null,
+                    'away_score_ht'   => null,
+                    'minute'          => null,
+                    'last_updated'    => null,
+                );
+            }
+        }
+
+        usort($matches, function ($a, $b) {
+            return $a['start_time'] - $b['start_time'];
+        });
+
+        $plan = array(
+            'date'            => $today,
+            'status'          => empty($matches) ? 'no_matches' : 'active',
+            'created_at'      => time(),
+            'api_calls_today' => 0,
+            'matches'         => $matches,
+        );
+
+        update_option('sofascore_daily_plan', $plan, false);
+
+        $match_count = count($matches);
+        if ($match_count > 0) {
+            $rounds = array_unique(array_column($matches, 'round'));
+            error_log(sprintf(
+                'SofaScore Smart-Scheduler: Plan na %s -- %d meczów, rundy: %s, godziny: %s',
+                $today,
+                $match_count,
+                implode(',', $rounds),
+                implode(', ', array_map(function ($m) { return date('H:i', $m['start_time']); }, $matches))
+            ));
+        } else {
+            error_log(sprintf('SofaScore Smart-Scheduler: Plan na %s -- brak meczów', $today));
+        }
+
+        return $plan;
+    }
+
+    /**
+     * Smart auto-refresh: odpytuje API tylko podczas trwania meczów,
+     * śledząc każdy mecz indywidualnie (per-match state machine).
      */
     public function auto_refresh_data() {
-        // Sprawdź czy auto-refresh jest włączony
         if (!get_option('sofascore_auto_refresh_enabled', 0)) {
             return;
         }
-        
-        // Pobierz harmonogram
-        $schedule = get_option('sofascore_refresh_schedule', array());
-        if (empty($schedule)) {
+
+        $plan = get_option('sofascore_daily_plan', array());
+        $today = date('Y-m-d');
+
+        // Jeśli nie ma planu na dziś, zbuduj go
+        if (empty($plan) || ($plan['date'] ?? '') !== $today) {
+            $plan = $this->build_daily_plan();
+        }
+
+        // Nic do roboty
+        if (in_array($plan['status'] ?? '', ['no_matches', 'complete'])) {
             return;
         }
-        
-        // Pobierz aktualny dzień tygodnia i czas
-        $current_day = strtolower(date('l')); // monday, tuesday, etc.
-        $current_time = date('H:i');
-        
-        // Sprawdź czy dzisiaj jest w harmonogramie
-        if (!isset($schedule[$current_day])) {
-            return;
-        }
-        
-        $day_schedule = $schedule[$current_day];
-        $from_time = $day_schedule['from'];
-        $to_time = $day_schedule['to'];
-        $frequency = intval($day_schedule['frequency']);
-        
-        // Sprawdź czy jesteśmy w zakresie godzin
-        if ($current_time < $from_time || $current_time > $to_time) {
-            return;
-        }
-        
-        // Sprawdź czy minęła wymagana częstotliwość od ostatniego odświeżenia
-        $last_refresh = get_option('sofascore_last_auto_refresh', 0);
-        $time_since_last = time() - $last_refresh;
-        $frequency_seconds = $frequency * 60;
-        
-        if ($time_since_last < $frequency_seconds) {
-            return; // Za wcześnie na kolejne odświeżanie
-        }
-        
-        // Wykonaj odświeżanie - pobierz wszystkie zapisane kolejki i je zaktualizuj
-        $saved_rounds = get_option('sofascore_saved_rounds', array());
-        
-        if (!empty($saved_rounds)) {
-            $current_season = '76477'; // Ekstraklasa 2024/2025
-            $updated_count = 0;
-            $overrides = get_option('sofascore_match_overrides', array());
-            
-            foreach ($saved_rounds as $round_number => $round_data) {
-                // Pobierz świeże dane z API
-                $result = $this->get_round_fixtures($current_season, $round_number);
-                
-                if ($result['success']) {
-                    $api_events = $result['data']['events'] ?? array();
-                    
-                    // Zastosuj overrides do meczów
-                    $merged_events = array();
-                    foreach ($api_events as $event) {
-                        $match_id = $event['id'] ?? null;
-                        
-                        // Jeśli jest override dla tego meczu, zastosuj go
-                        if ($match_id && isset($overrides[$match_id])) {
-                            $override = $overrides[$match_id];
-                            
-                            // Zachowaj oryginalne dane ale nadpisz wybrane pola
-                            $event['homeTeam']['name'] = $override['home_team'];
-                            $event['awayTeam']['name'] = $override['away_team'];
-                            $event['startTimestamp'] = $override['timestamp'];
-                            $event['status']['description'] = $override['status'];
-                            
-                            if ($override['home_score'] !== null) {
-                                $event['homeScore']['current'] = $override['home_score'];
-                            }
-                            if ($override['away_score'] !== null) {
-                                $event['awayScore']['current'] = $override['away_score'];
-                            }
-                            
-                            // Dodaj flagę że to override (do debugowania)
-                            $event['_manual_override'] = true;
-                        }
-                        
-                        $merged_events[] = $event;
-                    }
-                    
-                    // Zaktualizuj dane z połączonymi eventami
-                    $result['data']['events'] = $merged_events;
-                    
-                    $saved_rounds[$round_number] = array(
-                        'data' => $result['data'],
-                        'updated' => current_time('Y-m-d H:i:s'),
-                        'matches_count' => count($merged_events)
-                    );
-                    $updated_count++;
-                }
-                
-                // Małe opóźnienie między zapytaniami (żeby nie przytłoczyć API)
-                usleep(200000); // 0.2 sekundy
+
+        $now = time();
+        $rounds_to_query = array();
+        $any_active = false;
+
+        // Przejdź przez mecze i zaktualizuj stany
+        foreach ($plan['matches'] as &$match) {
+            $state = $match['state'];
+
+            // Stan końcowy -- nic nie robimy
+            if (in_array($state, ['finished', 'abandoned'])) {
+                continue;
             }
-            
-            // Zapisz zaktualizowane dane
-            update_option('sofascore_saved_rounds', $saved_rounds);
-            
-            // Zapisz czas ostatniego odświeżania
-            update_option('sofascore_last_auto_refresh', time());
-            
-            // Loguj odświeżanie
+
+            // waiting -> checking: nadeszła godzina startu
+            if ($state === 'waiting' && $now >= $match['start_time']) {
+                $match['state'] = 'checking';
+                $match['checking_since'] = $now;
+            }
+
+            // checking/force_check: sprawdź 15-min timeout
+            if (in_array($match['state'], ['checking', 'force_check'])) {
+                if ($match['checking_since'] && ($now - $match['checking_since'] > 15 * 60)) {
+                    $match['state'] = 'abandoned';
+                    error_log(sprintf(
+                        'SofaScore Smart-Scheduler: ABANDONED mecz %s (%s vs %s) -- nie rozpoczął się w ciągu 15 min',
+                        $match['event_id'], $match['home_team'], $match['away_team']
+                    ));
+                    continue;
+                }
+            }
+
+            // Mecze wymagające odpytania API
+            if (in_array($match['state'], ['checking', 'live', 'force_check'])) {
+                $rounds_to_query[$match['round']] = true;
+                $any_active = true;
+            }
+
+            // waiting -- jeszcze nie pora
+            if ($match['state'] === 'waiting') {
+                $any_active = true;
+            }
+        }
+        unset($match);
+
+        // Jeśli żadna runda nie wymaga odpytania, zapisz stan i wyjdź
+        if (empty($rounds_to_query)) {
+            if (!$any_active) {
+                $plan['status'] = 'complete';
+                error_log('SofaScore Smart-Scheduler: Wszystkie mecze zakończone/abandoned -- plan complete');
+            }
+            update_option('sofascore_daily_plan', $plan, false);
+            return;
+        }
+
+        // Odpytaj API -- jedna runda = jedno wywołanie
+        $current_season = '76477';
+        $overrides = get_option('sofascore_match_overrides', array());
+        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        $api_responses = array();
+
+        foreach (array_keys($rounds_to_query) as $round_number) {
+            $result = $this->get_round_fixtures($current_season, $round_number);
+            $plan['api_calls_today']++;
+
+            if ($result['success']) {
+                $api_responses[$round_number] = $result['data']['events'] ?? array();
+
+                // Zaktualizuj saved_rounds (z overrides)
+                $merged_events = array();
+                foreach ($api_responses[$round_number] as $event) {
+                    $mid = $event['id'] ?? null;
+                    if ($mid && isset($overrides[$mid])) {
+                        $ov = $overrides[$mid];
+                        $event['homeTeam']['name'] = $ov['home_team'];
+                        $event['awayTeam']['name'] = $ov['away_team'];
+                        $event['startTimestamp'] = $ov['timestamp'];
+                        $event['status']['description'] = $ov['status'];
+                        if ($ov['home_score'] !== null) $event['homeScore']['current'] = $ov['home_score'];
+                        if ($ov['away_score'] !== null) $event['awayScore']['current'] = $ov['away_score'];
+                        $event['_manual_override'] = true;
+                    }
+                    $merged_events[] = $event;
+                }
+
+                $saved_rounds[$round_number] = array(
+                    'data'          => array_merge($result['data'], ['events' => $merged_events]),
+                    'updated'       => current_time('Y-m-d H:i:s'),
+                    'matches_count' => count($merged_events),
+                );
+            }
+
+            usleep(100000); // 0.1s między rundami
+        }
+
+        update_option('sofascore_saved_rounds', $saved_rounds);
+
+        // Zaktualizuj stany meczów na podstawie odpowiedzi API
+        $all_done = true;
+        foreach ($plan['matches'] as &$match) {
+            if (in_array($match['state'], ['finished', 'abandoned'])) {
+                continue;
+            }
+            if ($match['state'] === 'waiting') {
+                $all_done = false;
+                continue;
+            }
+
+            // Znajdź event w odpowiedzi API
+            $round_events = $api_responses[$match['round']] ?? array();
+            $api_event = null;
+            foreach ($round_events as $ev) {
+                if (($ev['id'] ?? null) == $match['event_id']) {
+                    $api_event = $ev;
+                    break;
+                }
+            }
+
+            if (!$api_event) {
+                $all_done = false;
+                continue;
+            }
+
+            $api_type = strtolower($api_event['status']['type'] ?? '');
+            $match['api_status'] = $api_event['status']['description'] ?? null;
+            $match['api_status_code'] = $api_event['status']['code'] ?? null;
+            $match['home_score'] = $api_event['homeScore']['current'] ?? null;
+            $match['away_score'] = $api_event['awayScore']['current'] ?? null;
+            $match['home_score_ht'] = $api_event['homeScore']['period1'] ?? null;
+            $match['away_score_ht'] = $api_event['awayScore']['period1'] ?? null;
+            $match['last_updated'] = $now;
+
+            // Oblicz minutę meczu
+            if ($api_type === 'inprogress') {
+                $st = $api_event['statusTime'] ?? $api_event['time'] ?? array();
+                $initial = $st['initial'] ?? 0;
+                $ts_period = $st['timestamp'] ?? ($api_event['currentPeriodStartTimestamp'] ?? $now);
+                $match['minute'] = intval(($initial + ($now - $ts_period)) / 60);
+
+                if ($api_event['status']['code'] == 31) {
+                    $match['minute'] = 45;
+                }
+            }
+
+            // Przejścia stanów
+            if ($api_type === 'finished') {
+                $match['state'] = 'finished';
+                $match['minute'] = 90;
+                error_log(sprintf(
+                    'SofaScore Smart-Scheduler: FINISHED %s vs %s  %s:%s',
+                    $match['home_team'], $match['away_team'],
+                    $match['home_score'] ?? '-', $match['away_score'] ?? '-'
+                ));
+            } elseif ($api_type === 'inprogress') {
+                if (in_array($match['state'], ['checking', 'force_check'])) {
+                    error_log(sprintf(
+                        'SofaScore Smart-Scheduler: LIVE %s vs %s (minuta %d)',
+                        $match['home_team'], $match['away_team'], $match['minute'] ?? 0
+                    ));
+                }
+                $match['state'] = 'live';
+                $all_done = false;
+            } else {
+                $all_done = false;
+            }
+        }
+        unset($match);
+
+        if ($all_done && !$any_active) {
+            $plan['status'] = 'complete';
             error_log(sprintf(
-                'SofaScore Auto-Refresh: Zaktualizowano %d/%d kolejek o %s',
-                $updated_count,
-                count($saved_rounds),
-                date('Y-m-d H:i:s')
+                'SofaScore Smart-Scheduler: Plan COMPLETE -- %d wywołań API dzisiaj',
+                $plan['api_calls_today']
             ));
         }
+
+        update_option('sofascore_daily_plan', $plan, false);
+        update_option('sofascore_last_auto_refresh', $now);
     }
     
+    /**
+     * AJAX: Przeskanuj harmonogram na dziś (buduje plan od nowa)
+     */
+    public function ajax_rescan_daily_plan() {
+        check_ajax_referer('sofascore_settings', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        delete_option('sofascore_daily_plan');
+        $plan = $this->build_daily_plan();
+
+        $match_count = count($plan['matches']);
+        $rounds = array_unique(array_column($plan['matches'], 'round'));
+        $times = array_map(function ($m) { return date('H:i', $m['start_time']); }, $plan['matches']);
+
+        wp_send_json_success(array(
+            'message' => $match_count > 0
+                ? sprintf('Znaleziono %d meczów. Rundy: %s. Godziny: %s', $match_count, implode(', ', $rounds), implode(', ', $times))
+                : 'Brak meczów na dziś',
+            'plan' => $plan,
+        ));
+    }
+
+    /**
+     * AJAX: Resetuj mecz (force_check) -- dla przełożonych meczów
+     */
+    public function ajax_reset_match() {
+        check_ajax_referer('sofascore_settings', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        $event_id = isset($_POST['event_id']) ? sanitize_text_field($_POST['event_id']) : '';
+        if (empty($event_id)) {
+            wp_send_json_error(array('message' => 'Brak event_id'));
+        }
+
+        $plan = get_option('sofascore_daily_plan', array());
+        if (empty($plan['matches'])) {
+            wp_send_json_error(array('message' => 'Brak planu dnia'));
+        }
+
+        $found = false;
+        foreach ($plan['matches'] as &$match) {
+            if ($match['event_id'] == $event_id) {
+                $match['state'] = 'force_check';
+                $match['checking_since'] = time();
+                $match['minute'] = null;
+                $found = true;
+                break;
+            }
+        }
+        unset($match);
+
+        if (!$found) {
+            wp_send_json_error(array('message' => 'Nie znaleziono meczu o ID: ' . $event_id));
+        }
+
+        // Cofnij plan do stanu active (jeśli był complete)
+        $plan['status'] = 'active';
+        update_option('sofascore_daily_plan', $plan, false);
+
+        wp_send_json_success(array(
+            'message' => sprintf('Mecz %s ustawiony na force_check -- odpytywanie rozpocznie się od następnego cyklu', $event_id),
+            'plan' => $plan,
+        ));
+    }
+
+    /**
+     * AJAX: Pobierz aktualny plan dnia (do wyświetlenia w panelu)
+     */
+    public function ajax_get_daily_plan() {
+        check_ajax_referer('sofascore_settings', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        $plan = get_option('sofascore_daily_plan', array());
+        wp_send_json_success(array('plan' => $plan));
+    }
+
     /**
      * Zastosuj timezone offset do timestampu
      */
@@ -6415,12 +6661,10 @@ class SofaScoreEkstraklasa {
      * Przeplanuj cron job na podstawie nowych ustawień
      */
     private function reschedule_cron() {
-        // Wyczyść stary harmonogram
         wp_clear_scheduled_hook('sofascore_auto_refresh');
         
-        // Zaplanuj nowy - co 5 minut (będziemy sprawdzać czy jest w harmonogramie)
         if (!wp_next_scheduled('sofascore_auto_refresh')) {
-            wp_schedule_event(time(), 'every_5_minutes', 'sofascore_auto_refresh');
+            wp_schedule_event(time(), 'every_minute', 'sofascore_auto_refresh');
         }
     }
     
@@ -6982,10 +7226,29 @@ class SofaScoreEkstraklasa {
                     <button type="submit" class="button button-primary">💾 Zapisz ustawienia</button>
                 </p>
             </form>
+            
+            <!-- Smart Scheduler: Plan dnia -->
+            <div style="margin-top:30px; padding:20px; background:#f0f6fc; border:1px solid #0073aa; border-radius:8px;">
+                <h2>📋 Smart Scheduler — Plan dnia</h2>
+                <p class="description">Algorytm automatycznie skanuje harmonogram meczów raz dziennie i odpytuje API tylko podczas trwania meczów (co 1 minutę).</p>
+                
+                <div style="margin:15px 0; display:flex; gap:10px;">
+                    <button type="button" id="btn-rescan-plan" class="button button-primary">🔄 Przeskanuj harmonogram na dziś</button>
+                    <button type="button" id="btn-refresh-plan-view" class="button">📊 Odśwież widok</button>
+                </div>
+                
+                <div id="daily-plan-status" style="margin:15px 0; padding:12px; background:#fff; border:1px solid #ddd; border-radius:4px;">
+                    <em>Ładowanie planu...</em>
+                </div>
+                
+                <div id="daily-plan-matches" style="margin-top:15px;"></div>
+            </div>
         </div>
         
         <script>
         jQuery(document).ready(function($) {
+            var settingsNonce = '<?php echo wp_create_nonce('sofascore_settings'); ?>';
+            
             $('#sofascore-settings-form').on('submit', function(e) {
                 e.preventDefault();
                 
@@ -7011,6 +7274,124 @@ class SofaScoreEkstraklasa {
                     submitBtn.prop('disabled', false).text('💾 Zapisz ustawienia');
                 });
             });
+            
+            // Smart Scheduler UI
+            function renderPlan(plan) {
+                if (!plan || !plan.date) {
+                    $('#daily-plan-status').html('<em>Brak planu — kliknij "Przeskanuj harmonogram"</em>');
+                    $('#daily-plan-matches').html('');
+                    return;
+                }
+                
+                var stateLabels = {
+                    'waiting': '⏳ Oczekuje',
+                    'checking': '🔍 Sprawdzanie startu',
+                    'live': '🔴 LIVE',
+                    'finished': '✅ Zakończony',
+                    'abandoned': '⚠️ Porzucony',
+                    'force_check': '🔄 Wymuszony reset'
+                };
+                var stateColors = {
+                    'waiting': '#666',
+                    'checking': '#e67e22',
+                    'live': '#e74c3c',
+                    'finished': '#27ae60',
+                    'abandoned': '#95a5a6',
+                    'force_check': '#3498db'
+                };
+                
+                var statusHtml = '<strong>Data:</strong> ' + plan.date
+                    + ' | <strong>Status:</strong> ' + plan.status
+                    + ' | <strong>Wywołań API:</strong> ' + (plan.api_calls_today || 0)
+                    + ' | <strong>Meczów:</strong> ' + (plan.matches ? plan.matches.length : 0);
+                $('#daily-plan-status').html(statusHtml);
+                
+                if (!plan.matches || plan.matches.length === 0) {
+                    $('#daily-plan-matches').html('<p><em>Brak meczów na dziś</em></p>');
+                    return;
+                }
+                
+                var html = '<table class="widefat striped"><thead><tr>'
+                    + '<th>Godzina</th><th>Mecz</th><th>Kolejka</th><th>Wynik</th>'
+                    + '<th>Minuta</th><th>Status API</th><th>Stan</th><th>Akcja</th>'
+                    + '</tr></thead><tbody>';
+                
+                plan.matches.forEach(function(m) {
+                    var time = new Date(m.start_time * 1000);
+                    var timeStr = ('0' + time.getHours()).slice(-2) + ':' + ('0' + time.getMinutes()).slice(-2);
+                    var score = (m.home_score !== null && m.away_score !== null)
+                        ? m.home_score + ':' + m.away_score : '—';
+                    var ht = (m.home_score_ht !== null && m.away_score_ht !== null)
+                        ? ' (' + m.home_score_ht + ':' + m.away_score_ht + ')' : '';
+                    var minute = m.minute !== null ? m.minute + "'" : '—';
+                    var stateLabel = stateLabels[m.state] || m.state;
+                    var stateColor = stateColors[m.state] || '#333';
+                    var resetBtn = (m.state === 'abandoned' || m.state === 'finished')
+                        ? '<button class="button button-small btn-reset-match" data-event-id="' + m.event_id + '">Resetuj</button>'
+                        : '';
+                    
+                    html += '<tr>'
+                        + '<td>' + timeStr + '</td>'
+                        + '<td><strong>' + m.home_team + '</strong> vs <strong>' + m.away_team + '</strong></td>'
+                        + '<td style="text-align:center;">' + m.round + '</td>'
+                        + '<td style="text-align:center; font-weight:bold;">' + score + ht + '</td>'
+                        + '<td style="text-align:center;">' + minute + '</td>'
+                        + '<td>' + (m.api_status || '—') + '</td>'
+                        + '<td style="color:' + stateColor + '; font-weight:bold;">' + stateLabel + '</td>'
+                        + '<td>' + resetBtn + '</td>'
+                        + '</tr>';
+                });
+                
+                html += '</tbody></table>';
+                $('#daily-plan-matches').html(html);
+            }
+            
+            function loadPlan() {
+                $.post(ajaxurl, { action: 'sofascore_get_daily_plan', nonce: settingsNonce }, function(response) {
+                    if (response.success) {
+                        renderPlan(response.data.plan);
+                    }
+                });
+            }
+            
+            $('#btn-rescan-plan').on('click', function() {
+                var btn = $(this);
+                btn.prop('disabled', true).text('Skanuję...');
+                $.post(ajaxurl, { action: 'sofascore_rescan_daily_plan', nonce: settingsNonce }, function(response) {
+                    if (response.success) {
+                        alert('✅ ' + response.data.message);
+                        renderPlan(response.data.plan);
+                    } else {
+                        alert('❌ ' + (response.data ? response.data.message : 'Błąd'));
+                    }
+                }).always(function() {
+                    btn.prop('disabled', false).text('🔄 Przeskanuj harmonogram na dziś');
+                });
+            });
+            
+            $('#btn-refresh-plan-view').on('click', function() {
+                loadPlan();
+            });
+            
+            $(document).on('click', '.btn-reset-match', function() {
+                var eventId = $(this).data('event-id');
+                if (!confirm('Czy na pewno chcesz zresetować ten mecz? Algorytm zacznie odpytywać API od następnego cyklu.')) return;
+                var btn = $(this);
+                btn.prop('disabled', true).text('...');
+                $.post(ajaxurl, { action: 'sofascore_reset_match', nonce: settingsNonce, event_id: eventId }, function(response) {
+                    if (response.success) {
+                        alert('✅ ' + response.data.message);
+                        renderPlan(response.data.plan);
+                    } else {
+                        alert('❌ ' + (response.data ? response.data.message : 'Błąd'));
+                    }
+                }).always(function() {
+                    btn.prop('disabled', false).text('Resetuj');
+                });
+            });
+            
+            // Załaduj plan przy wejściu na stronę
+            loadPlan();
         });
         </script>
         <?php
