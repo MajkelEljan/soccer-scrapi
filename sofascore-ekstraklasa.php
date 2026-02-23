@@ -1509,6 +1509,7 @@ class SofaScoreEkstraklasa {
             align-items: center;
             gap: 6px;
             padding: 5px 16px;
+            white-space: nowrap;
         }
         .tl-left {
             justify-content: flex-start;
@@ -2024,7 +2025,7 @@ class SofaScoreEkstraklasa {
         }
         .timeline-row { display: flex; min-height: 34px; align-items: center; }
         .tl-left, .tl-right {
-            flex: 1; display: flex; align-items: center; gap: 6px; padding: 5px 16px;
+            flex: 1; display: flex; align-items: center; gap: 6px; padding: 5px 16px; white-space: nowrap;
         }
         .tl-left { justify-content: flex-start; }
         .tl-right { justify-content: flex-end; }
@@ -2885,6 +2886,13 @@ class SofaScoreEkstraklasa {
             $player = $inc['player'] ?? null;
             $assist = $inc['assist1'] ?? null;
 
+            if ($type === 'substitution') {
+                $pin  = $inc['playerIn'] ?? null;
+                $pout = $inc['playerOut'] ?? null;
+                if ($pin)  $player = $pin;
+                if ($pout) $assist = $pout;
+            }
+
             $wpdb->insert($table, array(
                 'event_id'       => $event_id,
                 'incident_type'  => $type,
@@ -3034,6 +3042,16 @@ class SofaScoreEkstraklasa {
         $assist = esc_html($inc['assist_name'] ?? '');
         $is_home = intval($inc['is_home'] ?? 0);
         $desc = strtolower($inc['description'] ?? '');
+
+        if ($type === 'substitution' && empty($player) && empty($assist) && !empty($inc['raw_json'])) {
+            $raw = json_decode($inc['raw_json'], true);
+            if ($raw) {
+                $pin  = $raw['playerIn'] ?? $raw['player'] ?? null;
+                $pout = $raw['playerOut'] ?? $raw['assist1'] ?? null;
+                if ($pin)  $player = esc_html($pin['shortName'] ?? $pin['name'] ?? '');
+                if ($pout) $assist = esc_html($pout['shortName'] ?? $pout['name'] ?? '');
+            }
+        }
 
         switch ($type) {
             case 'goal': $icon = '⚽'; break;
