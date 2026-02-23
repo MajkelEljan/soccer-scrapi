@@ -1605,6 +1605,10 @@ class SofaScoreEkstraklasa {
     private function render_wisla_fixtures_table($matches, $atts) {
         // Pobierz overrides
         $overrides = get_option('sofascore_match_overrides', array());
+
+        $show_incidents = get_option('sofascore_show_incidents', 0);
+        $show_media = get_option('sofascore_show_media', 0);
+        $has_details = ($show_incidents || $show_media);
         
         ob_start();
         ?>
@@ -1640,8 +1644,23 @@ class SofaScoreEkstraklasa {
                     
                     // Sprawdź czy Wisła gra u siebie czy na wyjeździe
                     $wisla_home = (stripos($match['homeTeam']['name'], 'Wisła') !== false);
+
+                    $event_id = $match['id'] ?? null;
+                    $match_incidents = array();
+                    $match_media = array();
+                    $has_expandable = false;
+                    if ($is_finished && $event_id && $has_details) {
+                        if ($show_incidents) {
+                            $match_incidents = $this->get_db_incidents($event_id);
+                        }
+                        if ($show_media) {
+                            $match_media = $this->get_db_media($event_id);
+                        }
+                        $has_expandable = (!empty($match_incidents) || !empty($match_media));
+                    }
                     ?>
-                     <div class="match-item wisla-match">
+                    <div class="match-wrapper">
+                     <div class="match-item wisla-match<?php echo $has_expandable ? ' match-expandable' : ''; ?>" <?php if ($has_expandable): ?>role="button" tabindex="0" aria-expanded="false"<?php endif; ?>>
                          <div class="match-round">
                              <span class="round-number">Kolejka <?php echo esc_html($match['round_number']); ?></span>
                          </div>
@@ -1677,6 +1696,9 @@ class SofaScoreEkstraklasa {
                                         <?php endif; ?>
                                     </span>
                                 <?php endif; ?>
+                                <?php if ($has_expandable): ?>
+                                    <span class="match-expand-icon">▼</span>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
@@ -1684,6 +1706,45 @@ class SofaScoreEkstraklasa {
                                 <?php endif; ?>
                             <?php endif; ?>
                         </div>
+                    </div>
+                    <?php if ($has_expandable): ?>
+                    <div class="match-details" style="display:none;">
+                        <?php if (!empty($match_incidents)): ?>
+                        <div class="match-incidents">
+                            <div class="details-section-title">Przebieg meczu</div>
+                            <?php foreach ($match_incidents as $inc): ?>
+                                <?php echo $this->render_incident_html($inc); ?>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php endif; ?>
+                        <?php if (!empty($match_media)): ?>
+                        <div class="match-media">
+                            <div class="details-section-title">Skróty / Media</div>
+                            <?php foreach ($match_media as $media): ?>
+                                <?php
+                                $yt_id = null;
+                                $url = $media['url'] ?? '';
+                                if (preg_match('/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/', $url, $ym)) {
+                                    $yt_id = $ym[1];
+                                }
+                                ?>
+                                <?php if ($yt_id): ?>
+                                <div class="media-embed">
+                                    <div class="media-title"><?php echo esc_html($media['title'] ?? ''); ?></div>
+                                    <div class="youtube-container">
+                                        <iframe src="https://www.youtube.com/embed/<?php echo esc_attr($yt_id); ?>" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe>
+                                    </div>
+                                </div>
+                                <?php else: ?>
+                                <div class="media-link">
+                                    <a href="<?php echo esc_url($url); ?>" target="_blank" rel="noopener"><?php echo esc_html($media['title'] ?? 'Obejrzyj'); ?></a>
+                                </div>
+                                <?php endif; ?>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
                     </div>
                 <?php endforeach; ?>
             </div>
@@ -1891,7 +1952,131 @@ class SofaScoreEkstraklasa {
                 margin-top: 8px;
             }
         }
+
+        /* Expandable match details - Wisła */
+        .wisla-terminarz .match-wrapper {
+            border-bottom: 1px solid #eee;
+        }
+        .wisla-terminarz .match-wrapper .match-item {
+            border-bottom: none;
+        }
+        .wisla-terminarz .match-expandable {
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .wisla-terminarz .match-expandable:hover {
+            background: #f0f4f8;
+        }
+        .match-expand-icon {
+            font-size: 0.7em;
+            color: #999;
+            margin-left: 8px;
+            transition: transform 0.25s;
+            display: inline-block;
+        }
+        .match-wrapper.open .match-expand-icon {
+            transform: rotate(180deg);
+        }
+        .match-details {
+            padding: 0 15px 15px 15px;
+            background: #fafbfc;
+            border-top: 1px solid #eee;
+        }
+        .details-section-title {
+            font-weight: 600;
+            font-size: 0.85em;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 12px 0 8px 0;
+        }
+        .incident-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 0;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+        .incident-time {
+            min-width: 40px;
+            font-weight: 600;
+            color: #666;
+            text-align: right;
+        }
+        .incident-icon {
+            min-width: 20px;
+            text-align: center;
+        }
+        .incident-text {
+            color: #333;
+        }
+        .incident-away {
+            padding-left: 20px;
+        }
+        .match-media {
+            margin-top: 10px;
+        }
+        .media-embed {
+            margin: 8px 0;
+        }
+        .media-title {
+            font-size: 0.85em;
+            color: #555;
+            margin-bottom: 6px;
+        }
+        .youtube-container {
+            position: relative;
+            width: 100%;
+            max-width: 560px;
+            padding-bottom: min(315px, 56.25%);
+            height: 0;
+            overflow: hidden;
+            border-radius: 6px;
+        }
+        .youtube-container iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .media-link {
+            margin: 6px 0;
+        }
+        .media-link a {
+            color: #0073aa;
+            text-decoration: none;
+        }
+        .media-link a:hover {
+            text-decoration: underline;
+        }
         </style>
+
+        <?php if ($has_details): ?>
+        <script>
+        (function() {
+            document.querySelectorAll('.wisla-terminarz .match-expandable').forEach(function(el) {
+                el.addEventListener('click', function() {
+                    var wrapper = el.closest('.match-wrapper');
+                    var details = wrapper.querySelector('.match-details');
+                    if (!details) return;
+                    var isOpen = wrapper.classList.contains('open');
+                    wrapper.classList.toggle('open');
+                    el.setAttribute('aria-expanded', !isOpen);
+                    details.style.display = isOpen ? 'none' : 'block';
+                });
+                el.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        el.click();
+                    }
+                });
+            });
+        })();
+        </script>
+        <?php endif; ?>
+
         <?php
         
         return ob_get_clean();
