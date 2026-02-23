@@ -1214,9 +1214,6 @@ class SofaScoreEkstraklasa {
                                             <?php endif; ?>
                                         </span>
                                     <?php endif; ?>
-                                    <?php if ($has_expandable): ?>
-                                        <span class="match-expand-icon">▼</span>
-                                    <?php endif; ?>
                                 <?php else: ?>
                                     <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                     <?php if (!empty($status)): ?>
@@ -1228,16 +1225,10 @@ class SofaScoreEkstraklasa {
                         <?php if ($has_expandable): ?>
                         <div class="match-details" style="display:none;">
                             <?php if (!empty($match_incidents)): ?>
-                            <div class="match-incidents">
-                                <div class="details-section-title">Przebieg meczu</div>
-                                <?php foreach ($match_incidents as $inc): ?>
-                                    <?php echo $this->render_incident_html($inc); ?>
-                                <?php endforeach; ?>
-                            </div>
+                                <?php echo $this->render_match_timeline($match_incidents); ?>
                             <?php endif; ?>
                             <?php if (!empty($match_media)): ?>
                             <div class="match-media">
-                                <div class="details-section-title">Skróty / Media</div>
                                 <?php foreach ($match_media as $media): ?>
                                     <?php
                                     $yt_id = null;
@@ -1484,58 +1475,96 @@ class SofaScoreEkstraklasa {
         .match-expandable:hover {
             background: #f8f9fa;
         }
-        .match-expand-icon {
-            font-size: 0.7em;
-            color: #999;
-            margin-left: 8px;
-            transition: transform 0.25s;
-            display: inline-block;
-        }
-        .match-wrapper.open .match-expand-icon {
-            transform: rotate(180deg);
-        }
         .match-details {
-            padding: 0 15px 15px 15px;
+            padding: 5px 0 10px 0;
             background: #fafbfc;
             border-top: 1px solid #eee;
         }
-        .details-section-title {
+
+        /* Timeline */
+        .match-timeline {
+            padding: 0;
+        }
+        .timeline-period {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f0f0f0;
+            padding: 6px 16px;
             font-weight: 600;
-            font-size: 0.85em;
+            font-size: 0.8em;
             color: #555;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin: 12px 0 8px 0;
+            border-radius: 4px;
+            margin: 2px 8px;
         }
-        .incident-row {
+        .timeline-row {
+            display: flex;
+            min-height: 34px;
+            align-items: center;
+        }
+        .tl-left, .tl-right {
+            flex: 1;
             display: flex;
             align-items: center;
             gap: 6px;
-            padding: 3px 0;
-            font-size: 0.9em;
-            line-height: 1.4;
+            padding: 5px 16px;
         }
-        .incident-time {
-            min-width: 40px;
+        .tl-left {
+            justify-content: flex-start;
+        }
+        .tl-right {
+            justify-content: flex-end;
+        }
+        .tl-time {
             font-weight: 600;
-            color: #666;
-            text-align: right;
+            color: #555;
+            min-width: 36px;
+            font-size: 0.88em;
         }
-        .incident-icon {
-            min-width: 20px;
-            text-align: center;
+        .tl-home .tl-time { text-align: left; }
+        .tl-away .tl-time { text-align: right; }
+        .tl-icon {
+            font-size: 1.05em;
+            line-height: 1;
         }
-        .incident-text {
-            color: #333;
+        .tl-score {
+            font-weight: 700;
+            background: #f0f0f0;
+            padding: 1px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            white-space: nowrap;
         }
-        .incident-away {
-            padding-left: 20px;
+        .tl-player {
+            font-size: 0.9em;
+            color: #222;
         }
+        .tl-player strong {
+            font-weight: 700;
+        }
+        .tl-assist {
+            font-size: 0.85em;
+            color: #888;
+        }
+        .tl-sub-out {
+            font-size: 0.88em;
+            color: #777;
+        }
+        .tl-reason {
+            font-size: 0.82em;
+            color: #999;
+            font-style: italic;
+        }
+
+        /* Media - wyśrodkowane */
         .match-media {
             margin-top: 10px;
+            text-align: center;
         }
         .media-embed {
-            margin: 8px 0;
+            margin: 8px auto;
+            max-width: 560px;
         }
         .media-title {
             font-size: 0.85em;
@@ -1550,6 +1579,7 @@ class SofaScoreEkstraklasa {
             height: 0;
             overflow: hidden;
             border-radius: 6px;
+            margin: 0 auto;
         }
         .youtube-container iframe {
             position: absolute;
@@ -1567,6 +1597,20 @@ class SofaScoreEkstraklasa {
         }
         .media-link a:hover {
             text-decoration: underline;
+        }
+
+        @media (max-width: 600px) {
+            .timeline-row {
+                min-height: 28px;
+            }
+            .tl-left, .tl-right {
+                padding: 4px 10px;
+                gap: 4px;
+            }
+            .tl-time { min-width: 30px; font-size: 0.82em; }
+            .tl-player { font-size: 0.84em; }
+            .tl-sub-out, .tl-assist { font-size: 0.8em; }
+            .timeline-period { padding: 5px 10px; font-size: 0.75em; }
         }
         </style>
 
@@ -1696,9 +1740,6 @@ class SofaScoreEkstraklasa {
                                         <?php endif; ?>
                                     </span>
                                 <?php endif; ?>
-                                <?php if ($has_expandable): ?>
-                                    <span class="match-expand-icon">▼</span>
-                                <?php endif; ?>
                             <?php else: ?>
                                 <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
@@ -1710,16 +1751,10 @@ class SofaScoreEkstraklasa {
                     <?php if ($has_expandable): ?>
                     <div class="match-details" style="display:none;">
                         <?php if (!empty($match_incidents)): ?>
-                        <div class="match-incidents">
-                            <div class="details-section-title">Przebieg meczu</div>
-                            <?php foreach ($match_incidents as $inc): ?>
-                                <?php echo $this->render_incident_html($inc); ?>
-                            <?php endforeach; ?>
-                        </div>
+                            <?php echo $this->render_match_timeline($match_incidents); ?>
                         <?php endif; ?>
                         <?php if (!empty($match_media)): ?>
                         <div class="match-media">
-                            <div class="details-section-title">Skróty / Media</div>
                             <?php foreach ($match_media as $media): ?>
                                 <?php
                                 $yt_id = null;
@@ -1967,89 +2002,68 @@ class SofaScoreEkstraklasa {
         .wisla-terminarz .match-expandable:hover {
             background: #f0f4f8;
         }
-        .match-expand-icon {
-            font-size: 0.7em;
-            color: #999;
-            margin-left: 8px;
-            transition: transform 0.25s;
-            display: inline-block;
-        }
-        .match-wrapper.open .match-expand-icon {
-            transform: rotate(180deg);
-        }
         .match-details {
-            padding: 0 15px 15px 15px;
+            padding: 5px 0 10px 0;
             background: #fafbfc;
             border-top: 1px solid #eee;
         }
-        .details-section-title {
+
+        .match-timeline { padding: 0; }
+        .timeline-period {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f0f0f0;
+            padding: 6px 16px;
             font-weight: 600;
-            font-size: 0.85em;
+            font-size: 0.8em;
             color: #555;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin: 12px 0 8px 0;
+            border-radius: 4px;
+            margin: 2px 8px;
         }
-        .incident-row {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 3px 0;
-            font-size: 0.9em;
-            line-height: 1.4;
+        .timeline-row { display: flex; min-height: 34px; align-items: center; }
+        .tl-left, .tl-right {
+            flex: 1; display: flex; align-items: center; gap: 6px; padding: 5px 16px;
         }
-        .incident-time {
-            min-width: 40px;
-            font-weight: 600;
-            color: #666;
-            text-align: right;
+        .tl-left { justify-content: flex-start; }
+        .tl-right { justify-content: flex-end; }
+        .tl-time { font-weight: 600; color: #555; min-width: 36px; font-size: 0.88em; }
+        .tl-home .tl-time { text-align: left; }
+        .tl-away .tl-time { text-align: right; }
+        .tl-icon { font-size: 1.05em; line-height: 1; }
+        .tl-score {
+            font-weight: 700; background: #f0f0f0; padding: 1px 8px;
+            border-radius: 4px; font-size: 0.85em; white-space: nowrap;
         }
-        .incident-icon {
-            min-width: 20px;
-            text-align: center;
-        }
-        .incident-text {
-            color: #333;
-        }
-        .incident-away {
-            padding-left: 20px;
-        }
-        .match-media {
-            margin-top: 10px;
-        }
-        .media-embed {
-            margin: 8px 0;
-        }
-        .media-title {
-            font-size: 0.85em;
-            color: #555;
-            margin-bottom: 6px;
-        }
+        .tl-player { font-size: 0.9em; color: #222; }
+        .tl-player strong { font-weight: 700; }
+        .tl-assist { font-size: 0.85em; color: #888; }
+        .tl-sub-out { font-size: 0.88em; color: #777; }
+        .tl-reason { font-size: 0.82em; color: #999; font-style: italic; }
+
+        .match-media { margin-top: 10px; text-align: center; }
+        .media-embed { margin: 8px auto; max-width: 560px; }
+        .media-title { font-size: 0.85em; color: #555; margin-bottom: 6px; }
         .youtube-container {
-            position: relative;
-            width: 100%;
-            max-width: 560px;
-            padding-bottom: min(315px, 56.25%);
-            height: 0;
-            overflow: hidden;
-            border-radius: 6px;
+            position: relative; width: 100%; max-width: 560px;
+            padding-bottom: min(315px, 56.25%); height: 0;
+            overflow: hidden; border-radius: 6px; margin: 0 auto;
         }
         .youtube-container iframe {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
         }
-        .media-link {
-            margin: 6px 0;
-        }
-        .media-link a {
-            color: #0073aa;
-            text-decoration: none;
-        }
-        .media-link a:hover {
-            text-decoration: underline;
+        .media-link { margin: 6px 0; }
+        .media-link a { color: #0073aa; text-decoration: none; }
+        .media-link a:hover { text-decoration: underline; }
+
+        @media (max-width: 600px) {
+            .timeline-row { min-height: 28px; }
+            .tl-left, .tl-right { padding: 4px 10px; gap: 4px; }
+            .tl-time { min-width: 30px; font-size: 0.82em; }
+            .tl-player { font-size: 0.84em; }
+            .tl-sub-out, .tl-assist { font-size: 0.8em; }
+            .timeline-period { padding: 5px 10px; font-size: 0.75em; }
         }
         </style>
 
@@ -2961,51 +2975,128 @@ class SofaScoreEkstraklasa {
         ), ARRAY_A);
     }
 
-    private function render_incident_html($inc) {
+    private function render_match_timeline($incidents) {
+        $first_half = array();
+        $second_half = array();
+
+        foreach ($incidents as $inc) {
+            if (($inc['incident_type'] ?? '') === 'injuryTime') continue;
+            $t = intval($inc['time'] ?? 0);
+            if ($t <= 45) {
+                $first_half[] = $inc;
+            } else {
+                $second_half[] = $inc;
+            }
+        }
+
+        $fh_home = 0; $fh_away = 0;
+        foreach ($first_half as $inc) {
+            if ($inc['incident_type'] === 'goal' && $inc['home_score'] !== null) {
+                $fh_home = intval($inc['home_score']);
+                $fh_away = intval($inc['away_score']);
+            }
+        }
+
+        $ft_home = $fh_home; $ft_away = $fh_away;
+        foreach ($second_half as $inc) {
+            if ($inc['incident_type'] === 'goal' && $inc['home_score'] !== null) {
+                $ft_home = intval($inc['home_score']);
+                $ft_away = intval($inc['away_score']);
+            }
+        }
+
+        $sh_home = $ft_home - $fh_home;
+        $sh_away = $ft_away - $fh_away;
+
+        $html = '<div class="match-timeline">';
+        $html .= '<div class="timeline-period"><span>1. POŁOWA</span><span>' . $fh_home . ' - ' . $fh_away . '</span></div>';
+        foreach ($first_half as $inc) {
+            $html .= $this->render_timeline_incident($inc);
+        }
+
+        if (!empty($second_half)) {
+            $html .= '<div class="timeline-period"><span>2. POŁOWA</span><span>' . $sh_home . ' - ' . $sh_away . '</span></div>';
+            foreach ($second_half as $inc) {
+                $html .= $this->render_timeline_incident($inc);
+            }
+        }
+
+        $html .= '</div>';
+        return $html;
+    }
+
+    private function render_timeline_incident($inc) {
         $time = intval($inc['time']);
         $added = intval($inc['added_time'] ?? 0);
         $time_str = $added > 0 ? "{$time}+{$added}'" : "{$time}'";
         $type = $inc['incident_type'] ?? '';
         $player = esc_html($inc['player_name'] ?? '');
         $assist = esc_html($inc['assist_name'] ?? '');
+        $is_home = intval($inc['is_home'] ?? 0);
+        $desc = strtolower($inc['description'] ?? '');
 
         switch ($type) {
-            case 'goal':
-                $icon = '⚽';
-                $class_extra = ($inc['incident_class'] === 'ownGoal') ? ' (sam.)' : '';
-                $class_extra .= ($inc['incident_class'] === 'penalty') ? ' (k.)' : '';
-                $score = '';
-                if ($inc['home_score'] !== null && $inc['away_score'] !== null) {
-                    $score = " ({$inc['home_score']}:{$inc['away_score']})";
-                }
-                $assist_str = $assist ? ", as. {$assist}" : '';
-                $text = "{$player}{$class_extra}{$assist_str}{$score}";
-                break;
+            case 'goal': $icon = '⚽'; break;
             case 'card':
-                $desc = strtolower($inc['incident_class'] ?? $inc['description'] ?? '');
-                if (strpos($desc, 'red') !== false || strpos($desc, 'yellowred') !== false) {
-                    $icon = '🟥';
-                } else {
-                    $icon = '🟨';
-                }
-                $text = $player;
+                $cc = strtolower($inc['incident_class'] ?? $desc);
+                $icon = (strpos($cc, 'red') !== false || strpos($cc, 'yellowred') !== false) ? '🟥' : '🟨';
                 break;
-            case 'substitution':
-                $icon = '🔄';
-                $text = $assist ? "{$assist} → {$player}" : $player;
-                break;
-            case 'injuryTime':
-                $icon = '⏱️';
-                $text = "Doliczony czas: {$inc['description']}";
-                break;
-            default:
-                $icon = '•';
-                $text = $player ?: ($inc['description'] ?? $type);
-                break;
+            case 'substitution': $icon = '🔄'; break;
+            default: $icon = '•'; break;
         }
 
-        $side_class = $inc['is_home'] ? 'incident-home' : 'incident-away';
-        return "<div class=\"incident-row {$side_class}\"><span class=\"incident-time\">{$time_str}</span> <span class=\"incident-icon\">{$icon}</span> <span class=\"incident-text\">{$text}</span></div>";
+        $p = array();
+        $t_span  = '<span class="tl-time">' . $time_str . '</span>';
+        $i_span  = '<span class="tl-icon">' . $icon . '</span>';
+
+        if ($type === 'goal') {
+            $suffix = '';
+            if ($inc['incident_class'] === 'ownGoal') $suffix = ' (sam.)';
+            if ($inc['incident_class'] === 'penalty') $suffix = ' (k.)';
+            $score = ($inc['home_score'] !== null && $inc['away_score'] !== null)
+                ? '<span class="tl-score">' . intval($inc['home_score']) . ' - ' . intval($inc['away_score']) . '</span>'
+                : '';
+            $assist_span = $assist ? '<span class="tl-assist">(' . $assist . ')</span>' : '';
+            $player_span = '<span class="tl-player"><strong>' . $player . $suffix . '</strong></span>';
+
+            if ($is_home) {
+                $p = array($t_span, $i_span, $score, $player_span, $assist_span);
+            } else {
+                $p = array($assist_span, $player_span, $score, $i_span, $t_span);
+            }
+        } elseif ($type === 'substitution') {
+            $injury = (strpos($desc, 'injury') !== false) ? '<span class="tl-reason">(Kontuzja)</span>' : '';
+            $in_span  = '<span class="tl-player"><strong>' . $player . '</strong></span>';
+            $out_span = '<span class="tl-sub-out">' . $assist . '</span>';
+
+            if ($is_home) {
+                $p = array($t_span, $i_span, $in_span, $injury, $out_span);
+            } else {
+                $p = array($injury, $out_span, $in_span, $i_span, $t_span);
+            }
+        } elseif ($type === 'card') {
+            $player_span = '<span class="tl-player"><strong>' . $player . '</strong></span>';
+            if ($is_home) {
+                $p = array($t_span, $i_span, $player_span);
+            } else {
+                $p = array($player_span, $i_span, $t_span);
+            }
+        } else {
+            $text = $player ?: esc_html($inc['description'] ?? $type);
+            $text_span = '<span class="tl-player">' . $text . '</span>';
+            if ($is_home) {
+                $p = array($t_span, $i_span, $text_span);
+            } else {
+                $p = array($text_span, $i_span, $t_span);
+            }
+        }
+
+        $content = implode(' ', array_filter($p));
+
+        if ($is_home) {
+            return '<div class="timeline-row tl-home"><div class="tl-left">' . $content . '</div><div class="tl-right"></div></div>';
+        }
+        return '<div class="timeline-row tl-away"><div class="tl-left"></div><div class="tl-right">' . $content . '</div></div>';
     }
 
     /**
