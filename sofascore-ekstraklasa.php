@@ -1174,11 +1174,12 @@ class SofaScoreEkstraklasa {
                     $match_incidents = array();
                     $match_media = array();
                     $has_expandable = false;
-                    if ($is_finished && $event_id && $has_details) {
+                    $is_live_check = in_array(strtolower($match['status']['type'] ?? ''), ['inprogress']);
+                    if (($is_finished || $is_live_check) && $event_id && $has_details) {
                         if ($show_incidents) {
                             $match_incidents = $this->get_db_incidents($event_id);
                         }
-                        if ($show_media) {
+                        if ($show_media && $is_finished) {
                             $match_media = $this->get_db_media($event_id);
                         }
                         $has_expandable = (!empty($match_incidents) || !empty($match_media));
@@ -1190,7 +1191,7 @@ class SofaScoreEkstraklasa {
                                 <span class="home-team"><?php echo esc_html($match['homeTeam']['name']); ?></span>
                                 <span class="vs">
                                     <?php
-                                    $is_live_pre = in_array(strtolower($match['status']['type'] ?? ''), ['inprogress']);
+                                    $is_live_pre = $is_live_check;
                                     $has_score_pre = isset($match['homeScore']['current']);
                                     if (($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)) || ($is_live_pre && $has_score_pre)): ?>
                                         <span class="match-separator">-</span>
@@ -1222,13 +1223,31 @@ class SofaScoreEkstraklasa {
                                         </span>
                                     <?php endif; ?>
                                 <?php elseif ($is_live && $has_live_score): ?>
+                                    <?php
+                                    $live_minute = null;
+                                    $st = $match['statusTime'] ?? $match['time'] ?? array();
+                                    $status_code = $match['status']['code'] ?? null;
+                                    if ($status_code == 31) {
+                                        $live_minute = 45;
+                                    } elseif (!empty($st)) {
+                                        $initial = $st['initial'] ?? 0;
+                                        $ts_period = $st['timestamp'] ?? ($match['currentPeriodStartTimestamp'] ?? 0);
+                                        if ($ts_period > 0) {
+                                            $live_minute = intval(($initial + (time() - $ts_period)) / 60);
+                                        }
+                                    }
+                                    ?>
                                     <span class="match-result match-live-result">
                                         <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
                                         <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
                                             <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
                                         <?php endif; ?>
                                     </span>
-                                    <span class="match-status match-status-live"><?php echo esc_html($status); ?></span>
+                                    <?php if ($live_minute !== null): ?>
+                                        <span class="match-live-minute"><?php echo $live_minute; ?><span class="live-pulse">'</span></span>
+                                    <?php else: ?>
+                                        <span class="match-status match-status-live"><?php echo esc_html($status); ?></span>
+                                    <?php endif; ?>
                                 <?php else: ?>
                                     <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                     <?php if (!empty($status)): ?>
@@ -1364,14 +1383,21 @@ class SofaScoreEkstraklasa {
         .match-status-live {
             color: #dc3545;
             font-weight: 600;
-            animation: live-pulse 2s ease-in-out infinite;
         }
         .match-live-result strong {
             color: #dc3545;
         }
-        @keyframes live-pulse {
+        .match-live-minute {
+            color: #dc3545;
+            font-weight: 700;
+            font-size: 0.85em;
+        }
+        .live-pulse {
+            animation: live-tick 1.5s ease-in-out infinite;
+        }
+        @keyframes live-tick {
             0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+            50% { opacity: 0; }
         }
         
         .match-result {
@@ -1721,11 +1747,12 @@ class SofaScoreEkstraklasa {
                     $match_incidents = array();
                     $match_media = array();
                     $has_expandable = false;
-                    if ($is_finished && $event_id && $has_details) {
+                    $is_live_check_w = in_array(strtolower($match['status']['type'] ?? ''), ['inprogress']);
+                    if (($is_finished || $is_live_check_w) && $event_id && $has_details) {
                         if ($show_incidents) {
                             $match_incidents = $this->get_db_incidents($event_id);
                         }
-                        if ($show_media) {
+                        if ($show_media && $is_finished) {
                             $match_media = $this->get_db_media($event_id);
                         }
                         $has_expandable = (!empty($match_incidents) || !empty($match_media));
@@ -1772,13 +1799,31 @@ class SofaScoreEkstraklasa {
                                     </span>
                                 <?php endif; ?>
                             <?php elseif ($is_live_w && $has_score_w): ?>
+                                <?php
+                                $live_minute_w = null;
+                                $st_w = $match['statusTime'] ?? $match['time'] ?? array();
+                                $status_code_w = $match['status']['code'] ?? null;
+                                if ($status_code_w == 31) {
+                                    $live_minute_w = 45;
+                                } elseif (!empty($st_w)) {
+                                    $initial_w = $st_w['initial'] ?? 0;
+                                    $ts_w = $st_w['timestamp'] ?? ($match['currentPeriodStartTimestamp'] ?? 0);
+                                    if ($ts_w > 0) {
+                                        $live_minute_w = intval(($initial_w + (time() - $ts_w)) / 60);
+                                    }
+                                }
+                                ?>
                                 <span class="match-result match-live-result">
                                     <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
                                     <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
                                         <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
                                     <?php endif; ?>
                                 </span>
-                                <span class="match-status match-status-live"><?php echo esc_html($status); ?></span>
+                                <?php if ($live_minute_w !== null): ?>
+                                    <span class="match-live-minute"><?php echo $live_minute_w; ?><span class="live-pulse">'</span></span>
+                                <?php else: ?>
+                                    <span class="match-status match-status-live"><?php echo esc_html($status); ?></span>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
@@ -7256,6 +7301,10 @@ class SofaScoreEkstraklasa {
                     $plan['api_calls_today']++;
                 }
             } elseif ($api_type === 'inprogress') {
+                if ($match['event_id']) {
+                    $this->fetch_and_store_incidents($match['event_id']);
+                    $plan['api_calls_today']++;
+                }
                 if (in_array($match['state'], ['checking', 'force_check'])) {
                     error_log(sprintf(
                         'SofaScore Smart-Scheduler: LIVE %s vs %s (minuta %d)',
