@@ -1189,7 +1189,10 @@ class SofaScoreEkstraklasa {
                             <div class="match-teams">
                                 <span class="home-team"><?php echo esc_html($match['homeTeam']['name']); ?></span>
                                 <span class="vs">
-                                    <?php if ($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)): ?>
+                                    <?php
+                                    $is_live_pre = in_array(strtolower($match['status']['type'] ?? ''), ['inprogress']);
+                                    $has_score_pre = isset($match['homeScore']['current']);
+                                    if (($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)) || ($is_live_pre && $has_score_pre)): ?>
                                         <span class="match-separator">-</span>
                                     <?php else: ?>
                                         vs
@@ -1198,6 +1201,10 @@ class SofaScoreEkstraklasa {
                                 <span class="away-team"><?php echo esc_html($match['awayTeam']['name']); ?></span>
                             </div>
                             <div class="match-info">
+                                <?php
+                                $is_live = $is_live_pre;
+                                $has_live_score = isset($match['homeScore']['current'], $match['awayScore']['current']);
+                                ?>
                                 <?php if ($is_finished): ?>
                                     <?php if ($has_manual_override && isset($match['homeScore']['current'], $match['awayScore']['current'])): ?>
                                         <span class="match-result">
@@ -1214,6 +1221,14 @@ class SofaScoreEkstraklasa {
                                             <?php endif; ?>
                                         </span>
                                     <?php endif; ?>
+                                <?php elseif ($is_live && $has_live_score): ?>
+                                    <span class="match-result match-live-result">
+                                        <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                        <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
+                                            <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
+                                        <?php endif; ?>
+                                    </span>
+                                    <span class="match-status match-status-live"><?php echo esc_html($status); ?></span>
                                 <?php else: ?>
                                     <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                     <?php if (!empty($status)): ?>
@@ -1345,6 +1360,18 @@ class SofaScoreEkstraklasa {
         .match-status {
             font-size: 0.8em;
             color: #666;
+        }
+        .match-status-live {
+            color: #dc3545;
+            font-weight: 600;
+            animation: live-pulse 2s ease-in-out infinite;
+        }
+        .match-live-result strong {
+            color: #dc3545;
+        }
+        @keyframes live-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
         
         .match-result {
@@ -1714,7 +1741,10 @@ class SofaScoreEkstraklasa {
                                 <?php echo esc_html($match['homeTeam']['name']); ?>
                             </span>
                             <span class="vs">
-                                <?php if ($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)): ?>
+                                <?php
+                                $is_live_w = in_array(strtolower($match['status']['type'] ?? ''), ['inprogress']);
+                                $has_score_w = isset($match['homeScore']['current']);
+                                if (($is_finished && (($event_details && isset($event_details['event']['homeScore']['current'])) || $has_manual_override)) || ($is_live_w && $has_score_w)): ?>
                                     <span class="match-separator">-</span>
                                 <?php else: ?>
                                     vs
@@ -1741,6 +1771,14 @@ class SofaScoreEkstraklasa {
                                         <?php endif; ?>
                                     </span>
                                 <?php endif; ?>
+                            <?php elseif ($is_live_w && $has_score_w): ?>
+                                <span class="match-result match-live-result">
+                                    <strong><?php echo $match['homeScore']['current']; ?>:<?php echo $match['awayScore']['current']; ?></strong>
+                                    <?php if (isset($match['homeScore']['period1'], $match['awayScore']['period1'])): ?>
+                                        <span class="halftime-result">(<?php echo $match['homeScore']['period1']; ?>:<?php echo $match['awayScore']['period1']; ?>)</span>
+                                    <?php endif; ?>
+                                </span>
+                                <span class="match-status match-status-live"><?php echo esc_html($status); ?></span>
                             <?php else: ?>
                                 <span class="match-date"><?php echo date('d.m.Y H:i', $this->apply_timezone_offset($match['startTimestamp'])); ?></span>
                                 <?php if (!empty($status)): ?>
