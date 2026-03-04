@@ -59,6 +59,13 @@ class SofaScoreEkstraklasa {
         add_action('wp_ajax_save_match_override', array($this, 'ajax_save_match_override'));
         add_action('wp_ajax_remove_match_override', array($this, 'ajax_remove_match_override'));
         
+        // AJAX handlers dla integracji z Football Pool
+        add_action('wp_ajax_sofascore_get_fp_rankings', array($this, 'ajax_get_fp_rankings'));
+        add_action('wp_ajax_sofascore_get_fp_ranking_matches', array($this, 'ajax_get_fp_ranking_matches'));
+        add_action('wp_ajax_sofascore_save_fp_mapping', array($this, 'ajax_save_fp_mapping'));
+        add_action('wp_ajax_sofascore_remove_fp_mapping', array($this, 'ajax_remove_fp_mapping'));
+        add_action('wp_ajax_sofascore_manual_fp_sync', array($this, 'ajax_manual_fp_sync'));
+
         // AJAX handlers dla smart scheduler
         add_action('wp_ajax_sofascore_rescan_daily_plan', array($this, 'ajax_rescan_daily_plan'));
         add_action('wp_ajax_sofascore_reset_match', array($this, 'ajax_reset_match'));
@@ -2934,6 +2941,55 @@ class SofaScoreEkstraklasa {
                 KEY event_id_idx (event_id)
             ) {$wpdb->get_charset_collate()};"
         );
+
+        // --- Tabela matches (warstwa zarządzania meczami Ekstraklasy + mapowanie FP) ---
+        $this->create_table_if_not_exists(
+            $wpdb->prefix . 'sofascore_matches',
+            "CREATE TABLE {$wpdb->prefix}sofascore_matches (
+                id bigint(20) NOT NULL AUTO_INCREMENT,
+                event_id bigint(20) NOT NULL,
+                round int(3) NOT NULL,
+                home_team varchar(255) NOT NULL,
+                away_team varchar(255) NOT NULL,
+                home_score tinyint DEFAULT NULL,
+                away_score tinyint DEFAULT NULL,
+                status varchar(30) DEFAULT NULL,
+                start_timestamp int(11) DEFAULT NULL,
+                fp_match_id int(11) DEFAULT NULL,
+                fp_synced tinyint(1) DEFAULT 0,
+                fp_synced_at datetime DEFAULT NULL,
+                updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY event_id_unique (event_id),
+                KEY fp_match_id_idx (fp_match_id),
+                KEY round_idx (round),
+                KEY status_idx (status)
+            ) {$wpdb->get_charset_collate()};"
+        );
+
+        // --- Tabela sync log (audit trail synchronizacji z Football Pool) ---
+        $this->create_table_if_not_exists(
+            $wpdb->prefix . 'sofascore_fp_sync_log',
+            "CREATE TABLE {$wpdb->prefix}sofascore_fp_sync_log (
+                id bigint(20) NOT NULL AUTO_INCREMENT,
+                event_id bigint(20) NOT NULL,
+                fp_match_id int(11) NOT NULL,
+                action varchar(20) NOT NULL,
+                home_score_src tinyint DEFAULT NULL,
+                away_score_src tinyint DEFAULT NULL,
+                home_score_dst tinyint DEFAULT NULL,
+                away_score_dst tinyint DEFAULT NULL,
+                result varchar(20) NOT NULL,
+                message text DEFAULT NULL,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY event_id_idx (event_id),
+                KEY created_at_idx (created_at)
+            ) {$wpdb->get_charset_collate()};"
+        );
+
+        // Migracja danych z saved_rounds do sofascore_matches (jednorazowa)
+        $this->migrate_saved_rounds_to_matches_table();
     }
 
     private function create_table_if_not_exists($table_name, $sql) {
@@ -2944,6 +3000,125 @@ class SofaScoreEkstraklasa {
             dbDelta($sql);
             error_log('SofaScore Plugin: Tabela ' . $table_name . ' utworzona.');
         }
+    }
+
+    /**
+     * Jednorazowa migracja meczów z saved_rounds do sofascore_matches.
+     * Bezpieczna: używa INSERT IGNORE, więc nie nadpisze istniejących danych.
+     */
+    private function migrate_saved_rounds_to_matches_table() {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'sofascore_matches';
+        $existing = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+        if ($existing > 0) {
+            return;
+        }
+
+        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        if (empty($saved_rounds)) {
+            return;
+        }
+
+        $count = 0;
+        foreach ($saved_rounds as $round_number => $round_data) {
+            $events = $round_data['data']['events'] ?? array();
+            foreach ($events as $event) {
+                $inserted = $this->upsert_match_to_table($event, intval($round_number));
+                if ($inserted) {
+                    $count++;
+                }
+            }
+        }
+
+        if ($count > 0) {
+            error_log("SofaScore Plugin: Zmigrowano {$count} meczów do sofascore_matches.");
+        }
+    }
+
+    /**
+     * Wstawia lub aktualizuje mecz w tabeli sofascore_matches.
+     * Nie dotyka kolumn fp_match_id / fp_synced (te zarządza admin ręcznie).
+     */
+    public function upsert_match_to_table($event, $round) {
+        global $wpdb;
+
+        $event_id = $event['id'] ?? null;
+        if (!$event_id) {
+            return false;
+        }
+
+        $table = $wpdb->prefix . 'sofascore_matches';
+
+        $home_team = $event['homeTeam']['name'] ?? 'N/A';
+        $away_team = $event['awayTeam']['name'] ?? 'N/A';
+        $status = $event['status']['description'] ?? null;
+        $start_ts = $event['startTimestamp'] ?? null;
+        $home_score = $event['homeScore']['current'] ?? null;
+        $away_score = $event['awayScore']['current'] ?? null;
+
+        $overrides = get_option('sofascore_match_overrides', array());
+        if (isset($overrides[$event_id])) {
+            $o = $overrides[$event_id];
+            $home_team = $o['home_team'] ?? $home_team;
+            $away_team = $o['away_team'] ?? $away_team;
+            $home_score = $o['home_score'] ?? $home_score;
+            $away_score = $o['away_score'] ?? $away_score;
+            $status = $o['status'] ?? $status;
+            $start_ts = $o['timestamp'] ?? $start_ts;
+        }
+
+        $data = array(
+            'event_id'        => $event_id,
+            'round'           => $round,
+            'home_team'       => $home_team,
+            'away_team'       => $away_team,
+            'home_score'      => $home_score,
+            'away_score'      => $away_score,
+            'status'          => $status,
+            'start_timestamp' => $start_ts,
+            'updated_at'      => current_time('mysql'),
+        );
+
+        $formats = array('%d', '%d', '%s', '%s', '%d', '%d', '%s', '%d', '%s');
+
+        $exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE event_id = %d", $event_id
+        ));
+
+        if ($exists) {
+            unset($data['event_id']);
+            array_shift($formats);
+            $wpdb->update($table, $data, array('event_id' => $event_id), $formats, array('%d'));
+        } else {
+            $wpdb->insert($table, $data, $formats);
+        }
+
+        return true;
+    }
+
+    /**
+     * Zapisuje wpis do audyt logu synchronizacji z Football Pool.
+     */
+    public function log_fp_sync($event_id, $fp_match_id, $action, $result, $scores = array(), $message = '') {
+        global $wpdb;
+
+        $wpdb->insert(
+            $wpdb->prefix . 'sofascore_fp_sync_log',
+            array(
+                'event_id'       => $event_id,
+                'fp_match_id'    => $fp_match_id,
+                'action'         => $action,
+                'home_score_src' => $scores['home_src'] ?? null,
+                'away_score_src' => $scores['away_src'] ?? null,
+                'home_score_dst' => $scores['home_dst'] ?? null,
+                'away_score_dst' => $scores['away_dst'] ?? null,
+                'result'         => $result,
+                'message'        => $message,
+                'created_at'     => current_time('mysql'),
+            ),
+            array('%d', '%d', '%s', '%d', '%d', '%d', '%d', '%s', '%s', '%s')
+        );
     }
 
     public function fetch_and_store_incidents($event_id) {
@@ -7239,7 +7414,17 @@ class SofaScoreEkstraklasa {
 
         update_option('sofascore_saved_rounds', $saved_rounds);
 
+        // Upsert meczów do tabeli sofascore_matches
+        foreach ($api_responses as $rnd => $events) {
+            foreach ($events as $ev) {
+                $this->upsert_match_to_table($ev, intval($rnd));
+            }
+        }
+
         // Zaktualizuj stany meczów na podstawie odpowiedzi API
+        $fp_synced_this_cycle = 0;
+        $fp_max_sync = intval(get_option('sofascore_fp_max_sync_per_cycle', 2));
+        $fp_sync_enabled = get_option('sofascore_fp_sync_enabled', 0);
         $all_done = true;
         foreach ($plan['matches'] as &$match) {
             if (in_array($match['state'], ['finished', 'abandoned'])) {
@@ -7299,6 +7484,17 @@ class SofaScoreEkstraklasa {
                 if ($was_not_finished && $match['event_id']) {
                     $this->fetch_and_store_incidents($match['event_id']);
                     $plan['api_calls_today']++;
+
+                    // Auto-sync do Football Pool (jeśli włączony i w limicie)
+                    if ($fp_sync_enabled && $fp_synced_this_cycle < $fp_max_sync) {
+                        $sync_result = $this->sync_match_to_fp($match['event_id']);
+                        if ($sync_result['success']) {
+                            $fp_synced_this_cycle++;
+                            error_log('SofaScore FP-Sync: ' . $sync_result['message']);
+                        }
+                    } elseif ($fp_sync_enabled && $fp_synced_this_cycle >= $fp_max_sync) {
+                        error_log('SofaScore FP-Sync: Limit synców (' . $fp_max_sync . ') osiągnięty w tym cyklu, event_id=' . $match['event_id'] . ' czeka na kolejny cykl');
+                    }
                 }
             } elseif ($api_type === 'inprogress') {
                 if ($match['event_id']) {
@@ -7318,6 +7514,24 @@ class SofaScoreEkstraklasa {
             }
         }
         unset($match);
+
+        // Doczyszczenie: sync meczów zmapowanych ale nieszsynchronizowanych z poprzednich cykli
+        if ($fp_sync_enabled && $fp_synced_this_cycle < $fp_max_sync) {
+            global $wpdb;
+            $sm_table = $wpdb->prefix . 'sofascore_matches';
+            $remaining = $fp_max_sync - $fp_synced_this_cycle;
+            $pending = $wpdb->get_results($wpdb->prepare(
+                "SELECT event_id FROM {$sm_table} WHERE status = 'Ended' AND fp_match_id IS NOT NULL AND fp_synced = 0 LIMIT %d",
+                $remaining
+            ));
+            foreach ($pending as $p) {
+                $sr = $this->sync_match_to_fp($p->event_id);
+                if ($sr['success']) {
+                    $fp_synced_this_cycle++;
+                    error_log('SofaScore FP-Sync (backfill): ' . $sr['message']);
+                }
+            }
+        }
 
         if ($all_done && !$any_active) {
             $plan['status'] = 'complete';
@@ -7537,6 +7751,13 @@ class SofaScoreEkstraklasa {
         // Zapisz ustawienia wyświetlania incidents/media
         update_option('sofascore_show_incidents', isset($_POST['show_incidents']) ? 1 : 0);
         update_option('sofascore_show_media', isset($_POST['show_media']) ? 1 : 0);
+
+        // Zapisz ustawienia integracji z Football Pool
+        update_option('sofascore_fp_sync_enabled', isset($_POST['fp_sync_enabled']) ? 1 : 0);
+        update_option('sofascore_fp_dry_run', isset($_POST['fp_dry_run']) ? 1 : 0);
+        update_option('sofascore_fp_ranking_filter', sanitize_text_field($_POST['fp_ranking_filter'] ?? ''));
+        update_option('sofascore_fp_max_sync_per_cycle', max(1, min(10, intval($_POST['fp_max_sync'] ?? 2))));
+        update_option('sofascore_fp_conflict_mode', in_array($_POST['fp_conflict_mode'] ?? '', array('skip', 'overwrite')) ? $_POST['fp_conflict_mode'] : 'skip');
         
         // Zapisz harmonogram dla każdego dnia tygodnia
         $days = array('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday');
@@ -7575,314 +7796,329 @@ class SofaScoreEkstraklasa {
     }
     
     /**
-     * Strona edycji meczów - ręczne korekty
+     * Strona edycji meczów - zarządzanie + integracja z Football Pool
      */
     public function edit_matches_page() {
-        $saved_rounds = get_option('sofascore_saved_rounds', array());
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_matches';
         $overrides = get_option('sofascore_match_overrides', array());
-        
-        // Filtrowanie
+
         $selected_round = isset($_GET['filter_round']) ? intval($_GET['filter_round']) : 0;
-        $show_only_overridden = isset($_GET['show_overridden']) && $_GET['show_overridden'] == '1';
-        
+        $filter_fp = isset($_GET['filter_fp']) ? sanitize_text_field($_GET['filter_fp']) : '';
+
+        $where = "WHERE 1=1";
+        if ($selected_round > 0) {
+            $where .= $wpdb->prepare(" AND round = %d", $selected_round);
+        }
+        if ($filter_fp === 'mapped') {
+            $where .= " AND fp_match_id IS NOT NULL";
+        } elseif ($filter_fp === 'unmapped') {
+            $where .= " AND fp_match_id IS NULL";
+        } elseif ($filter_fp === 'synced') {
+            $where .= " AND fp_synced = 1";
+        } elseif ($filter_fp === 'pending') {
+            $where .= " AND fp_match_id IS NOT NULL AND fp_synced = 0 AND status = 'Ended'";
+        }
+
+        $all_matches = $wpdb->get_results("SELECT * FROM {$table} {$where} ORDER BY round ASC, start_timestamp ASC");
+        $rounds = $wpdb->get_col("SELECT DISTINCT round FROM {$table} ORDER BY round ASC");
+
+        $fp_sync_enabled = get_option('sofascore_fp_sync_enabled', 0);
+        $fp_dry_run = get_option('sofascore_fp_dry_run', 1);
+
         ?>
         <div class="wrap">
-            <h1>✏️ Edycja meczów - Ręczne korekty</h1>
-            <p>Tutaj możesz ręcznie edytować dane meczów. Ręcznie edytowane mecze nie będą nadpisywane przez automatyczne odświeżanie.</p>
-            
-            <!-- Filtry -->
-            <form method="GET" style="margin:20px 0; padding:15px; background:white; border:1px solid #ccc;">
+            <h1>⚽ Zarządzanie meczami Ekstraklasy</h1>
+            <p>Mecze z SofaScore API z możliwością mapowania do Football Pool i synchronizacji wyników.</p>
+
+            <?php if ($fp_dry_run): ?>
+            <div class="notice notice-info inline"><p><strong>Tryb dry-run aktywny</strong> — synchronizacja loguje, ale nie zapisuje do Football Pool.</p></div>
+            <?php endif; ?>
+            <?php if (!$fp_sync_enabled): ?>
+            <div class="notice notice-warning inline"><p><strong>Automatyczna synchronizacja wyłączona</strong> (kill switch). Ręczna synchronizacja nadal dostępna.</p></div>
+            <?php endif; ?>
+
+            <form method="GET" style="margin:20px 0; padding:15px; background:white; border:1px solid #ccc; display:flex; gap:20px; align-items:center; flex-wrap:wrap;">
                 <input type="hidden" name="page" value="sofascore-edit-matches">
-                
-                <label style="margin-right:20px;">
-                    <strong>Filtruj po kolejce:</strong>
-                    <select name="filter_round" style="margin-left:10px;">
-                        <option value="0">Wszystkie kolejki</option>
-                        <?php for ($i = 1; $i <= 34; $i++): ?>
-                            <option value="<?php echo $i; ?>" <?php selected($selected_round, $i); ?>>
-                                Kolejka <?php echo $i; ?>
-                            </option>
-                        <?php endfor; ?>
+                <label>
+                    <strong>Kolejka:</strong>
+                    <select name="filter_round" style="margin-left:5px;">
+                        <option value="0">Wszystkie</option>
+                        <?php foreach ($rounds as $r): ?>
+                            <option value="<?php echo $r; ?>" <?php selected($selected_round, (int)$r); ?>>Kolejka <?php echo $r; ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </label>
-                
-                <label style="margin-right:20px;">
-                    <input type="checkbox" name="show_overridden" value="1" <?php checked($show_only_overridden, true); ?>>
-                    Tylko ręcznie edytowane
+                <label>
+                    <strong>Status FP:</strong>
+                    <select name="filter_fp" style="margin-left:5px;">
+                        <option value="">Wszystkie</option>
+                        <option value="mapped" <?php selected($filter_fp, 'mapped'); ?>>Zmapowane</option>
+                        <option value="unmapped" <?php selected($filter_fp, 'unmapped'); ?>>Niezmapowane</option>
+                        <option value="synced" <?php selected($filter_fp, 'synced'); ?>>Zsynchronizowane</option>
+                        <option value="pending" <?php selected($filter_fp, 'pending'); ?>>Do synchronizacji</option>
+                    </select>
                 </label>
-                
                 <button type="submit" class="button">Filtruj</button>
-                <a href="?page=sofascore-edit-matches" class="button">Reset filtrów</a>
+                <a href="?page=sofascore-edit-matches" class="button">Reset</a>
             </form>
-            
-            <?php
-            // Zbierz wszystkie mecze
-            $all_matches = array();
-            
-            foreach ($saved_rounds as $round_number => $round_data) {
-                // Filtrowanie po kolejce
-                if ($selected_round > 0 && $round_number != $selected_round) {
-                    continue;
-                }
-                
-                $events = $round_data['data']['events'] ?? array();
-                
-                foreach ($events as $event) {
-                    $match_id = $event['id'] ?? null;
-                    if (!$match_id) continue;
-                    
-                    $has_override = isset($overrides[$match_id]);
-                    
-                    // Filtrowanie - tylko z override
-                    if ($show_only_overridden && !$has_override) {
-                        continue;
-                    }
-                    
-                    $all_matches[] = array(
-                        'match_id' => $match_id,
-                        'round' => $round_number,
-                        'event' => $event,
-                        'has_override' => $has_override,
-                        'override_data' => $has_override ? $overrides[$match_id] : null
-                    );
-                }
-            }
-            
-            if (empty($all_matches)) {
-                echo '<div class="notice notice-info"><p>Brak meczów do wyświetlenia.</p></div>';
-            } else {
-                echo '<p><strong>Znaleziono meczów:</strong> ' . count($all_matches) . '</p>';
-                ?>
-                
-                <table class="wp-list-table widefat fixed striped">
+
+            <?php if (empty($all_matches)): ?>
+                <div class="notice notice-info"><p>Brak meczów do wyświetlenia. <?php if (empty($rounds)): ?>Tabela jest pusta — dezaktywuj i ponownie aktywuj plugin, aby zmigrować dane z saved_rounds.<?php endif; ?></p></div>
+            <?php else: ?>
+                <p><strong>Znaleziono meczów:</strong> <?php echo count($all_matches); ?></p>
+
+                <table class="wp-list-table widefat fixed striped" style="table-layout:auto;">
                     <thead>
                         <tr>
-                            <th style="width:60px;">Kolejka</th>
-                            <th style="width:140px;">Data/Czas</th>
+                            <th style="width:55px;">Kol.</th>
+                            <th style="width:130px;">Data</th>
                             <th>Gospodarze</th>
-                            <th style="width:80px;">Wynik</th>
+                            <th style="width:70px;text-align:center;">Wynik</th>
                             <th>Goście</th>
-                            <th style="width:120px;">Status</th>
-                            <th style="width:100px;">Akcje</th>
+                            <th style="width:90px;">Status</th>
+                            <th style="width:120px;">Typer FP</th>
+                            <th style="width:180px;">Akcje</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($all_matches as $match): 
-                            $event = $match['event'];
-                            $override = $match['override_data'];
-                            $has_override = $match['has_override'];
-                            
-                            // Użyj override jeśli istnieje, inaczej dane z API
-                            $home_team = $override['home_team'] ?? ($event['homeTeam']['name'] ?? 'N/A');
-                            $away_team = $override['away_team'] ?? ($event['awayTeam']['name'] ?? 'N/A');
-                            $status = $override['status'] ?? ($event['status']['description'] ?? 'N/A');
-                            $timestamp = $override['timestamp'] ?? ($event['startTimestamp'] ?? 0);
-                            $date_time = $timestamp ? date('Y-m-d H:i', $timestamp) : 'N/A';
-                            
-                            $home_score = $override['home_score'] ?? ($event['homeScore']['current'] ?? '-');
-                            $away_score = $override['away_score'] ?? ($event['awayScore']['current'] ?? '-');
-                            $score_display = $home_score . ':' . $away_score;
-                            
-                            $row_class = $has_override ? 'style="background:#fffbcc;"' : '';
-                        ?>
-                        <tr <?php echo $row_class; ?>>
-                            <td><strong>Kolejka <?php echo $match['round']; ?></strong></td>
-                            <td><?php echo esc_html($date_time); ?></td>
-                            <td><?php echo esc_html($home_team); ?></td>
-                            <td style="text-align:center;"><strong><?php echo esc_html($score_display); ?></strong></td>
-                            <td><?php echo esc_html($away_team); ?></td>
-                            <td><?php echo esc_html($status); ?></td>
+                    <?php foreach ($all_matches as $m):
+                        $eid = $m->event_id;
+                        $has_override = isset($overrides[$eid]);
+                        $hs = $m->home_score !== null ? $m->home_score : '-';
+                        $as = $m->away_score !== null ? $m->away_score : '-';
+                        $dt = $m->start_timestamp ? date('Y-m-d H:i', $m->start_timestamp) : '-';
+
+                        if ($m->fp_match_id && $m->fp_synced) {
+                            $fp_badge = '<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:#d4edda;color:#155724;font-size:12px;" title="Zsynchronizowany ' . esc_attr($m->fp_synced_at) . '">✅ FP#' . intval($m->fp_match_id) . '</span>';
+                        } elseif ($m->fp_match_id && !$m->fp_synced) {
+                            $fp_badge = '<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:#fff3cd;color:#856404;font-size:12px;">⏳ FP#' . intval($m->fp_match_id) . '</span>';
+                        } else {
+                            $fp_badge = '<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:#e9ecef;color:#6c757d;font-size:12px;">—</span>';
+                        }
+
+                        $row_style = $has_override ? ' style="background:#fffbcc;border-left:4px solid #f0c420;"' : '';
+                    ?>
+                        <tr<?php echo $row_style; ?>>
+                            <td><strong><?php echo intval($m->round); ?></strong></td>
+                            <td><?php echo esc_html($dt); ?></td>
+                            <td><?php echo esc_html($m->home_team); ?></td>
+                            <td style="text-align:center;"><strong><?php echo esc_html($hs . ':' . $as); ?></strong></td>
+                            <td><?php echo esc_html($m->away_team); ?></td>
+                            <td><?php echo esc_html($m->status ?? '-'); ?></td>
+                            <td><?php echo $fp_badge; ?></td>
                             <td>
-                                <?php if ($has_override): ?>
-                                    <span style="color:#d63638;">✏️ Edytowany</span><br>
-                                    <button class="button button-small edit-match-btn" 
-                                            data-match-id="<?php echo esc_attr($match['match_id']); ?>"
-                                            data-round="<?php echo esc_attr($match['round']); ?>">
-                                        Edytuj
-                                    </button>
-                                    <button class="button button-small restore-match-btn" 
-                                            data-match-id="<?php echo esc_attr($match['match_id']); ?>">
-                                        Przywróć z API
-                                    </button>
+                                <button class="button button-small edit-match-btn"
+                                        data-match-id="<?php echo esc_attr($eid); ?>"
+                                        data-round="<?php echo esc_attr($m->round); ?>">Edytuj</button>
+                                <?php if ($m->fp_match_id): ?>
+                                    <button class="button button-small fp-sync-btn" title="Wymuś synchronizację do Football Pool"
+                                            data-event-id="<?php echo esc_attr($eid); ?>">Sync FP</button>
+                                    <button class="button button-small fp-unmap-btn" title="Usuń mapowanie"
+                                            data-event-id="<?php echo esc_attr($eid); ?>" style="color:#d63638;">✕</button>
                                 <?php else: ?>
-                                    <button class="button button-small edit-match-btn" 
-                                            data-match-id="<?php echo esc_attr($match['match_id']); ?>"
-                                            data-round="<?php echo esc_attr($match['round']); ?>">
-                                        Edytuj
-                                    </button>
+                                    <button class="button button-small fp-map-btn"
+                                            data-event-id="<?php echo esc_attr($eid); ?>"
+                                            data-home="<?php echo esc_attr($m->home_team); ?>"
+                                            data-away="<?php echo esc_attr($m->away_team); ?>">Mapuj Typera</button>
                                 <?php endif; ?>
                             </td>
                         </tr>
-                        <?php endforeach; ?>
+                    <?php endforeach; ?>
                     </tbody>
                 </table>
-                <?php
-            }
-            ?>
+            <?php endif; ?>
         </div>
-        
-        <!-- Modal edycji meczu -->
+
+        <!-- Modal edycji meczu (istniejący) -->
         <div id="edit-match-modal" style="display:none; position:fixed; z-index:9999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.6);">
             <div style="background:white; margin:50px auto; padding:30px; width:600px; max-width:90%; border-radius:8px; position:relative;">
-                <span id="close-modal" style="position:absolute; top:15px; right:20px; font-size:28px; font-weight:bold; cursor:pointer;">&times;</span>
-                
+                <span class="modal-close" style="position:absolute; top:15px; right:20px; font-size:28px; font-weight:bold; cursor:pointer;">&times;</span>
                 <h2>Edytuj mecz</h2>
                 <form id="edit-match-form">
                     <?php wp_nonce_field('sofascore_edit_match', 'nonce'); ?>
                     <input type="hidden" id="edit_match_id" name="match_id">
                     <input type="hidden" id="edit_round" name="round">
-                    
                     <table class="form-table">
-                        <tr>
-                            <th><label for="edit_home_team">Drużyna gospodarzy</label></th>
-                            <td><input type="text" id="edit_home_team" name="home_team" class="regular-text" readonly style="background:#f0f0f0;"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_away_team">Drużyna gości</label></th>
-                            <td><input type="text" id="edit_away_team" name="away_team" class="regular-text" readonly style="background:#f0f0f0;"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_home_score">Wynik końcowy gospodarzy</label></th>
-                            <td><input type="number" id="edit_home_score" name="home_score" min="0" max="20" style="width:80px;"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_away_score">Wynik końcowy gości</label></th>
-                            <td><input type="number" id="edit_away_score" name="away_score" min="0" max="20" style="width:80px;"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_home_score_ht">Wynik do przerwy gospodarzy</label></th>
-                            <td><input type="number" id="edit_home_score_ht" name="home_score_ht" min="0" max="20" style="width:80px;" placeholder="opcjonalnie"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_away_score_ht">Wynik do przerwy gości</label></th>
-                            <td><input type="number" id="edit_away_score_ht" name="away_score_ht" min="0" max="20" style="width:80px;" placeholder="opcjonalnie"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_timestamp">Data i godzina</label></th>
-                            <td><input type="datetime-local" id="edit_timestamp" name="timestamp" class="regular-text"></td>
-                        </tr>
-                        <tr>
-                            <th><label for="edit_status">Status</label></th>
-                            <td>
-                                <select id="edit_status" name="status" class="regular-text">
-                                    <option value="Ended">Ended (Zakończony)</option>
-                                    <option value="Postponed">Postponed (Przełożony)</option>
-                                    <option value="Scheduled">Scheduled (Zaplanowany)</option>
-                                    <option value="Not started">Not started (Niezaplanowany)</option>
-                                </select>
-                            </td>
-                        </tr>
+                        <tr><th>Gospodarze</th><td><input type="text" id="edit_home_team" name="home_team" class="regular-text" readonly style="background:#f0f0f0;"></td></tr>
+                        <tr><th>Goście</th><td><input type="text" id="edit_away_team" name="away_team" class="regular-text" readonly style="background:#f0f0f0;"></td></tr>
+                        <tr><th>Wynik gospodarzy</th><td><input type="number" id="edit_home_score" name="home_score" min="0" max="20" style="width:80px;"></td></tr>
+                        <tr><th>Wynik gości</th><td><input type="number" id="edit_away_score" name="away_score" min="0" max="20" style="width:80px;"></td></tr>
+                        <tr><th>Do przerwy (G)</th><td><input type="number" id="edit_home_score_ht" name="home_score_ht" min="0" max="20" style="width:80px;" placeholder="opcj."></td></tr>
+                        <tr><th>Do przerwy (Go)</th><td><input type="number" id="edit_away_score_ht" name="away_score_ht" min="0" max="20" style="width:80px;" placeholder="opcj."></td></tr>
+                        <tr><th>Data i godzina</th><td><input type="datetime-local" id="edit_timestamp" name="timestamp" class="regular-text"></td></tr>
+                        <tr><th>Status</th><td>
+                            <select id="edit_status" name="status" class="regular-text">
+                                <option value="Ended">Ended (Zakończony)</option>
+                                <option value="Postponed">Postponed (Przełożony)</option>
+                                <option value="Scheduled">Scheduled (Zaplanowany)</option>
+                                <option value="Not started">Not started</option>
+                            </select>
+                        </td></tr>
                     </table>
-                    
                     <p class="submit">
                         <button type="submit" class="button button-primary">💾 Zapisz zmiany</button>
-                        <button type="button" id="cancel-edit" class="button">Anuluj</button>
+                        <button type="button" class="button modal-close">Anuluj</button>
                     </p>
                 </form>
             </div>
         </div>
-        
+
+        <!-- Modal "Mapuj Typera" -->
+        <div id="fp-map-modal" style="display:none; position:fixed; z-index:9999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.6);">
+            <div style="background:white; margin:50px auto; padding:30px; width:650px; max-width:90%; border-radius:8px; position:relative; max-height:80vh; overflow-y:auto;">
+                <span class="modal-close" style="position:absolute; top:15px; right:20px; font-size:28px; font-weight:bold; cursor:pointer;">&times;</span>
+                <h2>🔗 Mapuj do Football Pool</h2>
+                <p id="fp-map-match-label" style="font-size:14px; color:#555;"></p>
+                <input type="hidden" id="fp_map_event_id">
+
+                <div style="margin:15px 0;">
+                    <label><strong>1. Wybierz ranking:</strong></label>
+                    <select id="fp-ranking-select" style="width:100%; max-width:400px; margin-top:5px;">
+                        <option value="">— Ładowanie rankingów... —</option>
+                    </select>
+                </div>
+
+                <div id="fp-matches-container" style="margin:15px 0; display:none;">
+                    <label><strong>2. Wybierz mecz z rankingu:</strong></label>
+                    <div id="fp-matches-list" style="margin-top:10px; max-height:300px; overflow-y:auto; border:1px solid #ddd; border-radius:4px;"></div>
+                </div>
+            </div>
+        </div>
+
         <script>
         jQuery(document).ready(function($) {
-            // Otwórz modal
+            var editNonce = '<?php echo wp_create_nonce("sofascore_edit_match"); ?>';
+            var fpNonce = '<?php echo wp_create_nonce("sofascore_fp_action"); ?>';
+
+            // --- Edycja meczu (istniejąca logika) ---
             $('.edit-match-btn').on('click', function() {
                 var matchId = $(this).data('match-id');
                 var round = $(this).data('round');
-                
-                // Pobierz dane meczu
-                $.post(ajaxurl, {
-                    action: 'get_match_override_data',
-                    match_id: matchId,
-                    round: round,
-                    nonce: '<?php echo wp_create_nonce("sofascore_edit_match"); ?>'
-                }, function(response) {
-                    if (response.success) {
-                        var data = response.data;
+                $.post(ajaxurl, { action:'get_match_override_data', match_id:matchId, round:round, nonce:editNonce }, function(r) {
+                    if (r.success) {
+                        var d = r.data;
                         $('#edit_match_id').val(matchId);
                         $('#edit_round').val(round);
-                        $('#edit_home_team').val(data.home_team);
-                        $('#edit_away_team').val(data.away_team);
-                        $('#edit_home_score').val(data.home_score || '');
-                        $('#edit_away_score').val(data.away_score || '');
-                        $('#edit_home_score_ht').val(data.home_score_ht || '');
-                        $('#edit_away_score_ht').val(data.away_score_ht || '');
-                        $('#edit_timestamp').val(data.timestamp_formatted);
-                        $('#edit_status').val(data.status);
-                        
+                        $('#edit_home_team').val(d.home_team);
+                        $('#edit_away_team').val(d.away_team);
+                        $('#edit_home_score').val(d.home_score || '');
+                        $('#edit_away_score').val(d.away_score || '');
+                        $('#edit_home_score_ht').val(d.home_score_ht || '');
+                        $('#edit_away_score_ht').val(d.away_score_ht || '');
+                        $('#edit_timestamp').val(d.timestamp_formatted);
+                        $('#edit_status').val(d.status);
                         $('#edit-match-modal').show();
-                    } else {
-                        alert('Błąd: ' + response.data.message);
-                    }
+                    } else { alert('Błąd: ' + r.data.message); }
                 });
             });
-            
-            // Zamknij modal
-            $('#close-modal, #cancel-edit').on('click', function() {
-                $('#edit-match-modal').hide();
-            });
-            
-            // Zapisz zmiany
+
             $('#edit-match-form').on('submit', function(e) {
                 e.preventDefault();
-                
-                var formData = $(this).serializeArray();
-                var postData = {
-                    action: 'save_match_override'
-                };
-                
-                $.each(formData, function(i, field) {
-                    postData[field.name] = field.value;
-                });
-                
-                var submitBtn = $(this).find('button[type=submit]');
-                submitBtn.prop('disabled', true).text('Zapisywanie...');
-                
-                $.post(ajaxurl, postData, function(response) {
-                    if (response.success) {
-                        alert('✅ ' + response.data.message);
-                        location.reload();
+                var fd = $(this).serializeArray(), pd = { action:'save_match_override' };
+                $.each(fd, function(i,f){ pd[f.name] = f.value; });
+                var btn = $(this).find('button[type=submit]');
+                btn.prop('disabled',true).text('Zapisywanie...');
+                $.post(ajaxurl, pd, function(r) {
+                    if (r.success) { alert('✅ ' + r.data.message); location.reload(); }
+                    else { alert('❌ ' + r.data.message); }
+                }).always(function(){ btn.prop('disabled',false).text('💾 Zapisz zmiany'); });
+            });
+
+            // --- Mapuj Typera ---
+            $('.fp-map-btn').on('click', function() {
+                var eventId = $(this).data('event-id');
+                var home = $(this).data('home');
+                var away = $(this).data('away');
+                $('#fp_map_event_id').val(eventId);
+                $('#fp-map-match-label').text(home + ' vs ' + away);
+                $('#fp-matches-container').hide();
+                $('#fp-ranking-select').html('<option value="">Ładowanie...</option>');
+                $('#fp-map-modal').show();
+
+                $.post(ajaxurl, { action:'sofascore_get_fp_rankings', nonce:fpNonce }, function(r) {
+                    if (r.success && r.data.rankings) {
+                        var opts = '<option value="">— Wybierz ranking —</option>';
+                        $.each(r.data.rankings, function(i, rk) {
+                            opts += '<option value="' + rk.id + '">' + rk.name + ' (' + rk.match_count + ' meczów)</option>';
+                        });
+                        $('#fp-ranking-select').html(opts);
                     } else {
-                        alert('❌ ' + response.data.message);
+                        $('#fp-ranking-select').html('<option value="">Brak rankingów</option>');
                     }
-                }).always(function() {
-                    submitBtn.prop('disabled', false).text('💾 Zapisz zmiany');
                 });
             });
-            
-            // Przywróć z API
-            $('.restore-match-btn').on('click', function() {
-                if (!confirm('Czy na pewno chcesz przywrócić oryginalne dane z API? Ręczne zmiany zostaną utracone.')) {
-                    return;
-                }
-                
-                var matchId = $(this).data('match-id');
+
+            $('#fp-ranking-select').on('change', function() {
+                var rankingId = $(this).val();
+                if (!rankingId) { $('#fp-matches-container').hide(); return; }
+
+                $('#fp-matches-list').html('<em>Ładowanie meczów...</em>');
+                $('#fp-matches-container').show();
+
+                $.post(ajaxurl, { action:'sofascore_get_fp_ranking_matches', ranking_id:rankingId, nonce:fpNonce }, function(r) {
+                    if (r.success && r.data.matches) {
+                        var html = '';
+                        $.each(r.data.matches, function(i, m) {
+                            var scoreLabel = (m.home_score !== null && m.home_score !== '') ? m.home_score + ':' + m.away_score : 'brak wyniku';
+                            html += '<div class="fp-match-row" data-fp-id="' + m.id + '" style="padding:10px 14px; border-bottom:1px solid #eee; cursor:pointer; display:flex; justify-content:space-between; align-items:center;">';
+                            html += '<span><strong>' + m.home + '</strong> vs <strong>' + m.away + '</strong></span>';
+                            html += '<span style="color:#888; font-size:12px;">' + m.play_date + ' | ' + scoreLabel + ' | ID:' + m.id + '</span>';
+                            html += '</div>';
+                        });
+                        if (!html) html = '<p style="padding:10px;">Brak meczów w tym rankingu.</p>';
+                        $('#fp-matches-list').html(html);
+                    } else {
+                        $('#fp-matches-list').html('<p style="padding:10px; color:red;">Błąd pobierania meczów.</p>');
+                    }
+                });
+            });
+
+            $(document).on('click', '.fp-match-row', function() {
+                var fpMatchId = $(this).data('fp-id');
+                var eventId = $('#fp_map_event_id').val();
+                var label = $(this).find('strong').first().text() + ' vs ' + $(this).find('strong').last().text();
+
+                if (!confirm('Zmapować mecz SofaScore do FP#' + fpMatchId + ' (' + label + ')?')) return;
+
+                $.post(ajaxurl, { action:'sofascore_save_fp_mapping', event_id:eventId, fp_match_id:fpMatchId, nonce:fpNonce }, function(r) {
+                    if (r.success) { alert('✅ ' + r.data.message); location.reload(); }
+                    else { alert('❌ ' + r.data.message); }
+                });
+            });
+
+            // --- Sync FP ---
+            $('.fp-sync-btn').on('click', function() {
+                var eventId = $(this).data('event-id');
+                if (!confirm('Wymusić synchronizację wyniku do Football Pool?')) return;
                 var btn = $(this);
-                
-                btn.prop('disabled', true).text('Przywracanie...');
-                
-                $.post(ajaxurl, {
-                    action: 'remove_match_override',
-                    match_id: matchId,
-                    nonce: '<?php echo wp_create_nonce("sofascore_edit_match"); ?>'
-                }, function(response) {
-                    if (response.success) {
-                        alert('✅ ' + response.data.message);
-                        location.reload();
-                    } else {
-                        alert('❌ ' + response.data.message);
-                    }
-                }).always(function() {
-                    btn.prop('disabled', false).text('Przywróć z API');
+                btn.prop('disabled', true).text('...');
+                $.post(ajaxurl, { action:'sofascore_manual_fp_sync', event_id:eventId, nonce:fpNonce }, function(r) {
+                    alert(r.success ? ('✅ ' + r.data.message) : ('❌ ' + r.data.message));
+                    if (r.success) location.reload();
+                }).always(function(){ btn.prop('disabled',false).text('Sync FP'); });
+            });
+
+            // --- Usuń mapowanie ---
+            $('.fp-unmap-btn').on('click', function() {
+                if (!confirm('Usunąć mapowanie do Football Pool? Wynik w FP nie zostanie usunięty.')) return;
+                var eventId = $(this).data('event-id');
+                $.post(ajaxurl, { action:'sofascore_remove_fp_mapping', event_id:eventId, nonce:fpNonce }, function(r) {
+                    if (r.success) { alert('✅ ' + r.data.message); location.reload(); }
+                    else { alert('❌ ' + r.data.message); }
                 });
             });
+
+            // --- Zamykanie modali ---
+            $(document).on('click', '.modal-close', function() {
+                $(this).closest('[id$="-modal"]').hide();
+            });
+
+            // --- Hover na wierszach FP ---
+            $(document).on('mouseenter', '.fp-match-row', function(){ $(this).css('background','#f0f6fc'); });
+            $(document).on('mouseleave', '.fp-match-row', function(){ $(this).css('background',''); });
         });
         </script>
-        
-        <style>
-        .wp-list-table tr[style*="background:#fffbcc"] {
-            border-left: 4px solid #f0c420;
-        }
-        </style>
         <?php
     }
     
@@ -8028,6 +8264,272 @@ class SofaScoreEkstraklasa {
         }
     }
     
+    // ============================================================
+    //  AJAX: Integracja z Football Pool
+    // ============================================================
+
+    /**
+     * Pobierz rankingi Football Pool filtrowane po wzorcu z ustawień.
+     */
+    public function ajax_get_fp_rankings() {
+        check_ajax_referer('sofascore_fp_action', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        global $wpdb;
+        $filter = get_option('sofascore_fp_ranking_filter', '');
+        $pool_prefix = $wpdb->prefix . 'pool_';
+
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$pool_prefix}rankings'");
+        if (!$table_exists) {
+            wp_send_json_error(array('message' => 'Tabela pool_rankings nie istnieje. Czy Football Pool jest aktywny?'));
+        }
+
+        $where = '';
+        if (!empty($filter)) {
+            $like = '%' . $wpdb->esc_like($filter) . '%';
+            $where = $wpdb->prepare("WHERE name LIKE %s", $like);
+        }
+
+        $rankings = $wpdb->get_results(
+            "SELECT r.id, r.name,
+                    (SELECT COUNT(*) FROM {$pool_prefix}rankings_matches rm WHERE rm.ranking_id = r.id) AS match_count
+             FROM {$pool_prefix}rankings r {$where}
+             ORDER BY r.name"
+        );
+
+        wp_send_json_success(array('rankings' => $rankings));
+    }
+
+    /**
+     * Pobierz mecze z wybranego rankingu Football Pool.
+     */
+    public function ajax_get_fp_ranking_matches() {
+        check_ajax_referer('sofascore_fp_action', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        global $wpdb;
+        $ranking_id = intval($_POST['ranking_id'] ?? 0);
+        if ($ranking_id <= 0) {
+            wp_send_json_error(array('message' => 'Brak ranking_id'));
+        }
+
+        $pool_prefix = $wpdb->prefix . 'pool_';
+
+        $matches = $wpdb->get_results($wpdb->prepare(
+            "SELECT m.id, m.play_date, m.home_score, m.away_score,
+                    th.name AS home, ta.name AS away
+             FROM {$pool_prefix}matches m
+             JOIN {$pool_prefix}rankings_matches rm ON rm.match_id = m.id AND rm.ranking_id = %d
+             JOIN {$pool_prefix}teams th ON th.id = m.home_team_id
+             JOIN {$pool_prefix}teams ta ON ta.id = m.away_team_id
+             ORDER BY m.play_date ASC",
+            $ranking_id
+        ));
+
+        wp_send_json_success(array('matches' => $matches));
+    }
+
+    /**
+     * Zapisz mapowanie meczu SofaScore → Football Pool.
+     */
+    public function ajax_save_fp_mapping() {
+        check_ajax_referer('sofascore_fp_action', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_matches';
+        $event_id = intval($_POST['event_id'] ?? 0);
+        $fp_match_id = intval($_POST['fp_match_id'] ?? 0);
+
+        if (!$event_id || !$fp_match_id) {
+            wp_send_json_error(array('message' => 'Brak event_id lub fp_match_id'));
+        }
+
+        $already = $wpdb->get_var($wpdb->prepare(
+            "SELECT event_id FROM {$table} WHERE fp_match_id = %d AND event_id != %d",
+            $fp_match_id, $event_id
+        ));
+        if ($already) {
+            wp_send_json_error(array('message' => 'Ten mecz FP jest już zmapowany do innego meczu SofaScore (event_id: ' . $already . ')'));
+        }
+
+        $wpdb->update(
+            $table,
+            array('fp_match_id' => $fp_match_id, 'fp_synced' => 0, 'fp_synced_at' => null),
+            array('event_id' => $event_id),
+            array('%d', '%d', '%s'),
+            array('%d')
+        );
+
+        $this->log_fp_sync($event_id, $fp_match_id, 'mapped', 'success', array(), 'Mapowanie utworzone ręcznie');
+
+        wp_send_json_success(array('message' => 'Mecz zmapowany do FP#' . $fp_match_id));
+    }
+
+    /**
+     * Usuń mapowanie meczu SofaScore → Football Pool.
+     */
+    public function ajax_remove_fp_mapping() {
+        check_ajax_referer('sofascore_fp_action', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'sofascore_matches';
+        $event_id = intval($_POST['event_id'] ?? 0);
+
+        $match = $wpdb->get_row($wpdb->prepare("SELECT fp_match_id FROM {$table} WHERE event_id = %d", $event_id));
+        if (!$match || !$match->fp_match_id) {
+            wp_send_json_error(array('message' => 'Mecz nie jest zmapowany'));
+        }
+
+        $old_fp_id = $match->fp_match_id;
+        $wpdb->update(
+            $table,
+            array('fp_match_id' => null, 'fp_synced' => 0, 'fp_synced_at' => null),
+            array('event_id' => $event_id),
+            array('%s', '%d', '%s'),
+            array('%d')
+        );
+
+        $this->log_fp_sync($event_id, $old_fp_id, 'unmapped', 'success', array(), 'Mapowanie usunięte ręcznie');
+
+        wp_send_json_success(array('message' => 'Mapowanie do FP#' . $old_fp_id . ' usunięte'));
+    }
+
+    /**
+     * Ręczna synchronizacja wyniku meczu do Football Pool.
+     */
+    public function ajax_manual_fp_sync() {
+        check_ajax_referer('sofascore_fp_action', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Brak uprawnień'));
+        }
+
+        $event_id = intval($_POST['event_id'] ?? 0);
+        if (!$event_id) {
+            wp_send_json_error(array('message' => 'Brak event_id'));
+        }
+
+        $result = $this->sync_match_to_fp($event_id, true);
+        if ($result['success']) {
+            wp_send_json_success(array('message' => $result['message']));
+        } else {
+            wp_send_json_error(array('message' => $result['message']));
+        }
+    }
+
+    /**
+     * Centralna logika synchronizacji meczu z Football Pool.
+     * Używana zarówno przez auto-sync jak i ręczny przycisk.
+     */
+    public function sync_match_to_fp($event_id, $force = false) {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'sofascore_matches';
+        $pool_prefix = $wpdb->prefix . 'pool_';
+
+        $match = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE event_id = %d", $event_id));
+        if (!$match) {
+            return array('success' => false, 'message' => 'Mecz nie znaleziony w sofascore_matches');
+        }
+        if (!$match->fp_match_id) {
+            return array('success' => false, 'message' => 'Mecz nie jest zmapowany do Football Pool');
+        }
+        if ($match->home_score === null || $match->away_score === null) {
+            return array('success' => false, 'message' => 'Brak wyniku w SofaScore');
+        }
+        if ($match->fp_synced && !$force) {
+            return array('success' => false, 'message' => 'Mecz już zsynchronizowany (użyj force)');
+        }
+
+        $fp_active = is_plugin_active('football-pool/football-pool.php') || class_exists('Football_Pool');
+        if (!$fp_active) {
+            $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'error', array(), 'Football Pool nie jest aktywny');
+            return array('success' => false, 'message' => 'Football Pool nie jest aktywny');
+        }
+
+        $pool_match = $wpdb->get_row($wpdb->prepare(
+            "SELECT home_score, away_score FROM {$pool_prefix}matches WHERE id = %d",
+            $match->fp_match_id
+        ));
+        if (!$pool_match) {
+            $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'error', array(), 'Mecz FP#' . $match->fp_match_id . ' nie istnieje');
+            return array('success' => false, 'message' => 'Mecz FP#' . $match->fp_match_id . ' nie istnieje w bazie Football Pool');
+        }
+
+        $scores = array(
+            'home_src' => intval($match->home_score),
+            'away_src' => intval($match->away_score),
+            'home_dst' => $pool_match->home_score,
+            'away_dst' => $pool_match->away_score,
+        );
+
+        // Conflict detection
+        $conflict_mode = get_option('sofascore_fp_conflict_mode', 'skip');
+        if ($pool_match->home_score !== null && $pool_match->away_score !== null) {
+            if (intval($pool_match->home_score) !== intval($match->home_score) || intval($pool_match->away_score) !== intval($match->away_score)) {
+                $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'conflict', $scores,
+                    'FP ma ' . $pool_match->home_score . ':' . $pool_match->away_score . ', SofaScore ma ' . $match->home_score . ':' . $match->away_score);
+                if ($conflict_mode === 'skip' && !$force) {
+                    return array('success' => false, 'message' => 'Konflikt wyniku — FP ma ' . $pool_match->home_score . ':' . $pool_match->away_score . '. Użyj ręcznego sync, aby wymusić.');
+                }
+            }
+        }
+
+        // Dry-run check
+        $dry_run = get_option('sofascore_fp_dry_run', 1);
+        if ($dry_run && !$force) {
+            $this->log_fp_sync($event_id, $match->fp_match_id, 'dry_run', 'success', $scores,
+                'DRY-RUN: Zapisałby ' . $match->home_score . ':' . $match->away_score . ' do FP#' . $match->fp_match_id);
+            return array('success' => true, 'message' => 'Dry-run: wynik ' . $match->home_score . ':' . $match->away_score . ' zalogowany (bez zapisu do FP)');
+        }
+
+        // SYNC: zapis do Football Pool
+        $updated = $wpdb->update(
+            $pool_prefix . 'matches',
+            array('home_score' => intval($match->home_score), 'away_score' => intval($match->away_score)),
+            array('id' => $match->fp_match_id),
+            array('%d', '%d'),
+            array('%d')
+        );
+
+        if ($updated === false) {
+            $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'error', $scores, 'Błąd UPDATE: ' . $wpdb->last_error);
+            return array('success' => false, 'message' => 'Błąd zapisu do Football Pool: ' . $wpdb->last_error);
+        }
+
+        // Przeliczenie rankingu
+        $recalc_msg = '';
+        if (class_exists('Football_Pool_Admin_Score_Calculation')) {
+            Football_Pool_Admin_Score_Calculation::process();
+            $recalc_msg = ' + ranking przeliczony';
+        } else {
+            $recalc_msg = ' (ranking wymaga ręcznego przeliczenia)';
+        }
+
+        // Oznacz jako zsynchronizowany
+        $wpdb->update(
+            $table,
+            array('fp_synced' => 1, 'fp_synced_at' => current_time('mysql')),
+            array('event_id' => $event_id),
+            array('%d', '%s'),
+            array('%d')
+        );
+
+        $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'success', $scores,
+            'Zapisano ' . $match->home_score . ':' . $match->away_score . ' do FP#' . $match->fp_match_id . $recalc_msg);
+
+        return array('success' => true, 'message' => 'Wynik ' . $match->home_score . ':' . $match->away_score . ' zapisany do FP#' . $match->fp_match_id . $recalc_msg);
+    }
+
     /**
      * Strona ustawień
      */
@@ -8108,7 +8610,81 @@ class SofaScoreEkstraklasa {
                         </td>
                     </tr>
                 </table>
-                
+
+                <h2>🔗 Integracja z Football Pool</h2>
+                <p><em>Ustawienia automatycznej synchronizacji wyników meczów z pluginem Football Pool (typer).</em></p>
+                <?php
+                    $fp_sync_enabled  = get_option('sofascore_fp_sync_enabled', 0);
+                    $fp_dry_run       = get_option('sofascore_fp_dry_run', 1);
+                    $fp_ranking_filter = get_option('sofascore_fp_ranking_filter', '');
+                    $fp_max_sync      = get_option('sofascore_fp_max_sync_per_cycle', 2);
+                    $fp_conflict_mode = get_option('sofascore_fp_conflict_mode', 'skip');
+                    $fp_active        = is_plugin_active('football-pool/football-pool.php') || class_exists('Football_Pool');
+                ?>
+
+                <?php if (!$fp_active): ?>
+                <div class="notice notice-warning inline" style="margin:10px 0;">
+                    <p><strong>Football Pool nie jest aktywny.</strong> Integracja wymaga aktywnego pluginu Football Pool.</p>
+                </div>
+                <?php endif; ?>
+
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">
+                            <label for="fp_sync_enabled">Automatyczna synchronizacja</label>
+                        </th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="fp_sync_enabled" id="fp_sync_enabled" value="1" <?php checked($fp_sync_enabled, 1); ?>>
+                                Włącz automatyczne uzupełnianie wyników w Football Pool
+                            </label>
+                            <p class="description">Gdy włączone, wyniki zakończonych meczów (zmapowanych) będą automatycznie wpisywane do Football Pool. <strong>Wyłącz w razie problemów (kill switch).</strong></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="fp_dry_run">Tryb dry-run (testowy)</label>
+                        </th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="fp_dry_run" id="fp_dry_run" value="1" <?php checked($fp_dry_run, 1); ?>>
+                                Tylko loguj, nie zapisuj do Football Pool
+                            </label>
+                            <p class="description">Gdy włączone, mechanizm loguje co <em>zrobiłby</em> w audit logu (<code>sofascore_fp_sync_log</code>), ale nie modyfikuje danych Football Pool. Idealne do testowania.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="fp_ranking_filter">Filtr rankingów Football Pool</label>
+                        </th>
+                        <td>
+                            <input type="text" name="fp_ranking_filter" id="fp_ranking_filter" value="<?php echo esc_attr($fp_ranking_filter); ?>" class="regular-text" placeholder="np. ESA">
+                            <p class="description">Wpisz fragment nazwy rankingów, które mają się pojawiać przy mapowaniu meczów (np. <code>ESA</code> pokaże tylko rankingi z "ESA" w nazwie).</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="fp_max_sync">Limit synców na cykl</label>
+                        </th>
+                        <td>
+                            <input type="number" name="fp_max_sync" id="fp_max_sync" value="<?php echo esc_attr($fp_max_sync); ?>" min="1" max="10" style="width:80px;">
+                            <p class="description">Maksymalna liczba meczów synchronizowanych w jednym cyklu auto-refresh. Zabezpieczenie przed masową aktualizacją w wyniku błędu.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="fp_conflict_mode">Wykrywanie konfliktów</label>
+                        </th>
+                        <td>
+                            <select name="fp_conflict_mode" id="fp_conflict_mode">
+                                <option value="skip" <?php selected($fp_conflict_mode, 'skip'); ?>>Pomiń (nie nadpisuj istniejącego wyniku w FP)</option>
+                                <option value="overwrite" <?php selected($fp_conflict_mode, 'overwrite'); ?>>Nadpisz (zastąp wynik w FP nowym z SofaScore)</option>
+                            </select>
+                            <p class="description">Co zrobić, gdy Football Pool już ma wpisany wynik inny niż ten z SofaScore. Zalecane: <strong>Pomiń</strong>.</p>
+                        </td>
+                    </tr>
+                </table>
+
                 <h2>📅 Harmonogram automatycznego odświeżania</h2>
                 <p><em>Ustaw zakres godzin i częstotliwość odświeżania dla każdego dnia tygodnia.</em></p>
                 
