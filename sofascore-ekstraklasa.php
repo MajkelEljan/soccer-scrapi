@@ -8279,7 +8279,7 @@ class SofaScoreEkstraklasa {
 
         global $wpdb;
         $filter = get_option('sofascore_fp_ranking_filter', '');
-        $pool_prefix = $wpdb->prefix . 'pool_';
+        $pool_prefix = 'pool_' . $wpdb->prefix;
 
         $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$pool_prefix}rankings'");
         if (!$table_exists) {
@@ -8317,7 +8317,7 @@ class SofaScoreEkstraklasa {
             wp_send_json_error(array('message' => 'Brak ranking_id'));
         }
 
-        $pool_prefix = $wpdb->prefix . 'pool_';
+        $pool_prefix = 'pool_' . $wpdb->prefix;
 
         $matches = $wpdb->get_results($wpdb->prepare(
             "SELECT m.id, m.play_date, m.home_score, m.away_score,
@@ -8434,7 +8434,7 @@ class SofaScoreEkstraklasa {
         global $wpdb;
 
         $table = $wpdb->prefix . 'sofascore_matches';
-        $pool_prefix = $wpdb->prefix . 'pool_';
+        $pool_prefix = 'pool_' . $wpdb->prefix;
 
         $match = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE event_id = %d", $event_id));
         if (!$match) {
