@@ -8506,13 +8506,28 @@ class SofaScoreEkstraklasa {
             return array('success' => false, 'message' => 'Błąd zapisu do Football Pool: ' . $wpdb->last_error);
         }
 
-        // Przeliczenie rankingu
+        // Przeliczenie rankingu (iteracyjne wywołanie w trybie CLI, jak wp football-pool calc)
         $recalc_msg = '';
         if (class_exists('Football_Pool_Admin_Score_Calculation')) {
-            Football_Pool_Admin_Score_Calculation::process();
-            $recalc_msg = ' + ranking przeliczony';
+            $calc_args = array('force_calculation' => 0, 'iteration' => 0);
+            $calc_args = Football_Pool_Admin_Score_Calculation::process(true, $calc_args);
+            $completed = $calc_args['completed'] ?? 0;
+            $error = $calc_args['error'] ?? false;
+            $safety = 0;
+            while ($completed !== 1 && $error === false && $safety < 500) {
+                $calc_args = Football_Pool_Admin_Score_Calculation::process(true, $calc_args);
+                $completed = $calc_args['completed'] ?? 0;
+                $error = $calc_args['error'] ?? false;
+                $safety++;
+            }
+            if ($completed === 1) {
+                $recalc_msg = ' + ranking przeliczony';
+            } else {
+                $recalc_msg = ' (przeliczenie rankingu nie powiodło się po ' . $safety . ' iteracjach)';
+                error_log('SofaScore FP-Sync: Ranking recalculation failed after ' . $safety . ' iterations');
+            }
         } else {
-            $recalc_msg = ' (ranking wymaga ręcznego przeliczenia)';
+            $recalc_msg = ' (ranking wymaga ręcznego przeliczenia - klasa FP niedostępna)';
         }
 
         // Oznacz jako zsynchronizowany
