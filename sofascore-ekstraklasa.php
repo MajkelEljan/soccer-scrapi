@@ -8493,6 +8493,7 @@ class SofaScoreEkstraklasa {
         }
 
         // SYNC: zapis do Football Pool
+        $action_label = $force ? 'manual' : 'sync';
         $updated = $wpdb->update(
             $pool_prefix . 'matches',
             array('home_score' => intval($match->home_score), 'away_score' => intval($match->away_score)),
@@ -8502,11 +8503,23 @@ class SofaScoreEkstraklasa {
         );
 
         if ($updated === false) {
-            $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'error', $scores, 'Błąd UPDATE: ' . $wpdb->last_error);
+            $this->log_fp_sync($event_id, $match->fp_match_id, $action_label, 'error', $scores, 'Błąd UPDATE: ' . $wpdb->last_error);
             return array('success' => false, 'message' => 'Błąd zapisu do Football Pool: ' . $wpdb->last_error);
         }
 
+        // Weryfikacja zapisu -- odczytaj wynik z FP i porównaj
+        $verify = $wpdb->get_row($wpdb->prepare(
+            "SELECT home_score, away_score FROM {$pool_prefix}matches WHERE id = %d",
+            $match->fp_match_id
+        ));
+        if (!$verify || intval($verify->home_score) !== intval($match->home_score) || intval($verify->away_score) !== intval($match->away_score)) {
+            $this->log_fp_sync($event_id, $match->fp_match_id, $action_label, 'error', $scores,
+                'Weryfikacja zapisu FAILED: FP zwraca ' . ($verify ? $verify->home_score . ':' . $verify->away_score : 'NULL') . ', oczekiwano ' . $match->home_score . ':' . $match->away_score);
+            return array('success' => false, 'message' => 'Wynik zapisany do FP, ale weryfikacja odczytu nie powiodła się. Ranking NIE przeliczony.');
+        }
+
         // Przeliczenie rankingu (iteracyjne wywołanie w trybie CLI, jak wp football-pool calc)
+        $recalc_ok = false;
         $recalc_msg = '';
         if (class_exists('Football_Pool_Admin_Score_Calculation')) {
             $calc_args = array('force_calculation' => 0, 'iteration' => 0);
@@ -8521,16 +8534,17 @@ class SofaScoreEkstraklasa {
                 $safety++;
             }
             if ($completed === 1) {
+                $recalc_ok = true;
                 $recalc_msg = ' + ranking przeliczony';
             } else {
-                $recalc_msg = ' (przeliczenie rankingu nie powiodło się po ' . $safety . ' iteracjach)';
+                $recalc_msg = ' + UWAGA: przeliczenie rankingu nie powiodło się (' . $safety . ' iteracji)';
                 error_log('SofaScore FP-Sync: Ranking recalculation failed after ' . $safety . ' iterations');
             }
         } else {
-            $recalc_msg = ' (ranking wymaga ręcznego przeliczenia - klasa FP niedostępna)';
+            $recalc_msg = ' + UWAGA: klasa FP niedostępna, ranking wymaga ręcznego przeliczenia';
         }
 
-        // Oznacz jako zsynchronizowany
+        // Oznacz jako zsynchronizowany (wynik wpisany + zweryfikowany; ranking osobno)
         $wpdb->update(
             $table,
             array('fp_synced' => 1, 'fp_synced_at' => current_time('mysql')),
@@ -8539,8 +8553,9 @@ class SofaScoreEkstraklasa {
             array('%d')
         );
 
-        $this->log_fp_sync($event_id, $match->fp_match_id, $force ? 'manual' : 'sync', 'success', $scores,
-            'Zapisano ' . $match->home_score . ':' . $match->away_score . ' do FP#' . $match->fp_match_id . $recalc_msg);
+        $log_result = $recalc_ok ? 'success' : 'partial';
+        $this->log_fp_sync($event_id, $match->fp_match_id, $action_label, $log_result, $scores,
+            'Zapisano ' . $match->home_score . ':' . $match->away_score . ' do FP#' . $match->fp_match_id . ' (zweryfikowano)' . $recalc_msg);
 
         return array('success' => true, 'message' => 'Wynik ' . $match->home_score . ':' . $match->away_score . ' zapisany do FP#' . $match->fp_match_id . $recalc_msg);
     }
